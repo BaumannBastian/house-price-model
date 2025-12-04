@@ -13,3 +13,15 @@ data/
 
 # model files
 models/
+
+# notebooks
+notebooks/
+
+# plots
+plots/
+
+# logs
+logs/
+
+# predicted files
+predictions/
