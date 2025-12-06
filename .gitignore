@@ -1,3 +1,11 @@
+# ------------------------------
+# .gitignore
+#
+# In dieser Datei werden Verzeichnisse/Dateien definiert, die nicht
+# ins Git-Repository eingecheckt werden sollen (Build-Artefakte, Logs,
+# temporäre Dateien, virtuelle Umgebungen usw.).
+# ------------------------------
+
 # Python virtual environments
 .venv/
 venv/

@@ -1,0 +1,29 @@
+# ------------------------------
+# .dockerignore
+#
+# In dieser Datei werden Verzeichnisse/Dateien definiert, die beim
+# Docker-Build-Kontext ignoriert werden sollen.
+# ------------------------------
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python-Bytecode & Cache-Verzeichnisse
+__pycache__/
+
+# Git-Metadaten
+.git/
+.gitignore
+
+# Daten & Modelle (lokale Dateien / Artefakte)
+data/
+models/
+
+# Logs & Plots
+logs/
+plots/
+
+# Notebooks
+notebooks/
+*.ipynb

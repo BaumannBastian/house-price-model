@@ -1,3 +1,10 @@
+# ------------------------------
+# Dockerfile
+#
+# Dieses Dockerfile baut ein Docker-Image für das House-Price-Projekt
+# (Training und Prediction) inkl. aller benötigten Python-Abhängigkeiten.
+# ------------------------------
+
 # Basis: schlankes Python unter Linux
 FROM python:3.11-slim
 

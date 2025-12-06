@@ -1,23 +1,31 @@
+# ------------------------------
 # src/nn_models.py
+#
+# In dieser Python-Datei wird ein einfacher MLP-Regressor in PyTorch
+# bereitgestellt, der sich wie ein sklearn-Regressor verhält und in
+# sklearn-Pipelines (inkl. Target-Transformation) integriert werden kann.
+# ------------------------------
 
 from __future__ import annotations
 
 import numpy as np
 import torch
 import torch.nn as nn
+
+from typing import Tuple
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from dataclasses import dataclass
-from typing import Iterable, Tuple
 
 
 class TorchMLPRegressor(BaseEstimator, RegressorMixin):
     """
-    Einfacher MLP-Regressor in PyTorch, der sich wie ein sklearn-Regressor verhält.
-    - fit(X, y): trainiert das Netz
-    - predict(X): gibt Vorhersagen als numpy-Array zurück
+    Einfacher Feedforward-MLP-Regressor auf Basis von PyTorch.
+
+    Der Regressor implementiert die sklearn-Schnittstelle mit
+    ``fit(X, y)`` und ``predict(X)`` und kann daher direkt in
+    sklearn-Pipelines verwendet werden.
     """
 
     def __init__(
@@ -29,13 +37,51 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
         device: str = "cpu",
         verbose: bool = False,
         random_state: int = 42,
-
-        # early stopping parameter
+        # Early-Stopping-Parameter
         early_stopping: bool = False,
         val_fraction: float = 0.1,
         patience: int = 20,
         min_delta: float = 0.0,
     ) -> None:
+        """
+        Initialisiert den MLP-Regressor mit Trainings- und Modell-Hyperparametern.
+
+        Parameter
+        ----------
+        hidden_dims : Tuple[int, ...], optional
+            Anzahl Neuronen pro Hidden Layer, z.B. ``(128, 64)``.
+        lr : float, optional
+            Lernrate für den Adam-Optimizer.
+        batch_size : int, optional
+            Batchgröße für das Training.
+        max_epochs : int, optional
+            Maximale Anzahl Trainingsepochen (Obergrenze, vor Early Stopping).
+        device : str, optional
+            Zielgerät für das Training, z.B. ``"cpu"`` oder ``"cuda"``.
+        verbose : bool, optional
+            Wenn ``True``, werden in regelmäßigen Abständen Trainingsinformationen
+            (Train-/Val-Loss und Lernrate) auf der Konsole ausgegeben.
+        random_state : int, optional
+            Seed für NumPy- und PyTorch-Randomness, um reproduzierbare
+            Ergebnisse zu erhalten.
+        early_stopping : bool, optional
+            Ob Early Stopping anhand eines Validierungssets verwendet werden soll.
+        val_fraction : float, optional
+            Anteil der Trainingsdaten, der als Validierungsset abgetrennt wird,
+            falls ``early_stopping=True``.
+        patience : int, optional
+            Anzahl der Epochen ohne Verbesserung des Validierungs-Loss, bevor
+            das Training frühzeitig abgebrochen wird.
+        min_delta : float, optional
+            Mindestverbesserung des Validierungs-Loss, damit eine Epoche
+            als „Verbesserung“ zählt.
+
+        Returns
+        -------
+        None
+            Der Konstruktor gibt keinen Wert zurück. Die eigentliche Netzwerk-
+            Architektur wird beim ersten Aufruf von :meth:`fit` erzeugt.
+        """
         self.hidden_dims = hidden_dims
         self.lr = lr
         self.batch_size = batch_size
@@ -44,7 +90,7 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
         self.verbose = verbose
         self.random_state = random_state
 
-        # earlly stopping parameter
+        # Early-Stopping-Parameter
         self.early_stopping = early_stopping
         self.val_fraction = val_fraction
         self.patience = patience
@@ -55,7 +101,20 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
 
     def _build_model(self, input_dim: int) -> nn.Module:
         """
-        Baut ein einfaches Feedforward-Netz mit ReLU-Aktivierungen.
+        Baut ein mehrschichtiges Feedforward-Netz mit ReLU-Aktivierungen.
+
+        Es wird ein vollvernetztes MLP mit den in ``hidden_dims`` angegebenen
+        Layer-Größen erzeugt. Der Output-Layer hat genau eine Einheit (Regression).
+
+        Parameter
+        ----------
+        input_dim : int
+            Dimension des Eingangsvektors (Anzahl Features nach Preprocessing).
+
+        Returns
+        -------
+        torch.nn.Module
+            PyTorch-Modell, das die definierte MLP-Architektur repräsentiert.
         """
         layers: list[nn.Module] = []
         in_dim = input_dim
@@ -63,20 +122,33 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
         for h in self.hidden_dims:
             layers.append(nn.Linear(in_dim, h))
             layers.append(nn.ReLU())
-            # layers.append(nn.SiLU())
             in_dim = h
 
         # Output: 1 Wert (Regression)
         layers.append(nn.Linear(in_dim, 1))
 
         return nn.Sequential(*layers)
-    
-    def fit(self, X, y):
+
+    def fit(self, X, y) -> "TorchMLPRegressor":
         """
-        Trainiert das MLP auf X, y.
-        Erwartet:
-        - X: array-ähnlich, shape (n_samples, n_features)
-        - y: array-ähnlich, shape (n_samples,)
+        Trainiert das MLP auf die übergebenen Trainingsdaten.
+
+        Die Daten werden in NumPy-Arrays konvertiert, in Trainings- und ggf.
+        Validierungsteil gesplittet und über einen DataLoader in Mini-Batches
+        an das Netzwerk verfüttert. Optional wird Early Stopping basierend
+        auf dem Validierungs-Loss verwendet.
+
+        Parameter
+        ----------
+        X : array-ähnlich, shape (n_samples, n_features)
+            Designmatrix mit numerischen Features (nach Preprocessing).
+        y : array-ähnlich, shape (n_samples,)
+            Zielvariable (z.B. SalePrice oder log-transformierter SalePrice).
+
+        Returns
+        -------
+        TorchMLPRegressor
+            Referenz auf das trainierte Objekt (ermöglicht Method Chaining).
         """
         rng = np.random.RandomState(self.random_state)
         torch.manual_seed(self.random_state)
@@ -132,7 +204,7 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
         optimizer = torch.optim.Adam(
             self._model.parameters(),
             lr=self.lr,
-            weight_decay=1e-3,  # deine bisherige Regularisierung
+            weight_decay=1e-3,
         )
 
         # Learning-Rate-Scheduler
@@ -199,7 +271,6 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
                             f"[TorchMLP] Early stopping at epoch {epoch+1}, "
                             f"best_val_loss={best_val_loss:.4f}"
                         )
-                    # Scheduler NICHT mehr weitersteppen, wir brechen ja ab
                     break
 
             else:
@@ -221,10 +292,21 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
 
         return self
 
-
     def predict(self, X):
         """
-        Gibt Vorhersagen als numpy-Array der Form (n_samples,) zurück.
+        Gibt Vorhersagen des trainierten MLP als NumPy-Array zurück.
+
+        Parameter
+        ----------
+        X : array-ähnlich, shape (n_samples, n_features)
+            Designmatrix mit denselben Features/Preprocessing-Schritten
+            wie im Training.
+
+        Returns
+        -------
+        numpy.ndarray
+            1D-Array der Länge ``n_samples`` mit den vorhergesagten
+            Zielwerten im Originalraum (ohne log-Transformation).
         """
         if self._model is None:
             raise RuntimeError("Modell wurde noch nicht fit() trainiert.")
@@ -243,30 +325,37 @@ class TorchMLPRegressor(BaseEstimator, RegressorMixin):
 def build_torch_mlp_model(
     preprocessor: ColumnTransformer,
     use_log_target: bool = False,
-    # hidden_dims: Tuple[int, ...] = (128, 64),
-    # lr: float = 1e-3,
-    # batch_size: int = 64,
-    # max_epochs: int = 50,
-    # device: str = "cpu",
-    # verbose: bool = False,
-    # random_state: int = 42,
-):
+) -> TransformedTargetRegressor:
     """
-    Baut eine Pipeline aus:
-    - Preprocessing (ColumnTransformer)
-    - TorchMLPRegressor (PyTorch-MLP)
+    Erzeugt eine sklearn-Pipeline auf Basis des TorchMLPRegressor.
 
-    Wenn use_log_target=True, wird das Target intern mit log1p/exp1
-    über TransformedTargetRegressor transformiert.
+    Aufbau:
+    - Preprocessing via ``ColumnTransformer`` (z.B. aus ``build_preprocessor``)
+    - Standardisierung der Features mit ``StandardScaler``
+    - PyTorch-MLP-Regressor (:class:`TorchMLPRegressor`)
+    Optional wird das Target über ``log1p``/``expm1`` transformiert, wenn
+    ``use_log_target=True`` gesetzt ist.
+
+    Parameter
+    ----------
+    preprocessor : sklearn.compose.ColumnTransformer
+        ColumnTransformer, der Rohdaten in numerische Features überführt.
+    use_log_target : bool, optional
+        Wenn ``True``, wird das Target intern mit ``np.log1p`` transformiert
+        und die Vorhersagen mit ``np.expm1`` zurücktransformiert.
+
+    Returns
+    -------
+    sklearn.compose.TransformedTargetRegressor
+        Wrapper um die MLP-Pipeline, der optional die log-Transformation
+        des Targets kapselt und wie ein normaler sklearn-Regressor
+        verwendet werden kann.
     """
-
     base = Pipeline(
         steps=[
             ("preprocess", preprocessor),
-            ("scale", StandardScaler()),  
-            ("regressor",
-             TorchMLPRegressor(),
-            ),
+            ("scale", StandardScaler()),
+            ("regressor", TorchMLPRegressor()),
         ]
     )
 
