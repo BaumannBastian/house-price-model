@@ -4,27 +4,61 @@
 # In dieser Python-Datei werden Hilfsfunktionen bereitgestellt, um
 # Verbindungen zur PostgreSQL-Datenbank herzustellen sowie
 # Vorhersagen und Modell-Metadaten zu speichern und auszulesen.
+#
+# Die Verbindungsdaten (Host, Port, Name, User, Passwort, SSL-Mode)
+# werden über Umgebungsvariablen konfiguriert:
+#
+#   DB_HOST     – z.B. FQDN des Azure-Postgres-Servers
+#   DB_PORT     – z.B. "5432"
+#   DB_NAME     – z.B. "house_prices"
+#   DB_USER     – z.B. "hpadmin" oder ein eigener App-User
+#   DB_PASSWORD – Passwort für diesen User
+#   DB_SSLMODE  – z.B. "require" (Azure) oder "disable" (lokale Tests)
+#
+# Für lokale Entwicklung existieren sinnvolle Default-Werte, sodass
+# die Variablen nicht zwingend gesetzt sein müssen.
 # ------------------------------
 
-import psycopg2
+import os
+from typing import Iterable
+
 import numpy as np
+import psycopg2
 from psycopg2.extras import Json
 
 
-DB_HOST = "localhost"
-DB_PORT = 5432
-DB_NAME = "house_prices"
-DB_USER = "house"
-DB_PASSWORD = "house"
+# ---------------------------------------------------------------------------
+# Konfiguration über Umgebungsvariablen
+# ---------------------------------------------------------------------------
+
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = int(os.getenv("DB_PORT", "5432"))
+DB_NAME = os.getenv("DB_NAME", "house_prices")
+DB_USER = os.getenv("DB_USER", "house")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "house")
+# Für Azure-Postgres ist "require" üblich; für lokale Docker-DB kann
+# man DB_SSLMODE="disable" setzen.
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
 
 
 def get_connection():
     """
-    Stellt eine neue Verbindung zur lokalen PostgreSQL-Datenbank her.
+    Stellt eine neue Verbindung zur PostgreSQL-Datenbank her.
 
-    Verwendet die in den Modulkonstanten `DB_HOST`, `DB_PORT`, `DB_NAME`,
-    `DB_USER` und `DB_PASSWORD` hinterlegten Verbindungsdaten, um eine
-    frische Datenbankverbindung zu öffnen.
+    Die Verbindungsparameter werden über Umgebungsvariablen konfiguriert
+    und in Modulkonstanten gespiegelt:
+
+    - ``DB_HOST`` (str): Hostname oder FQDN des Servers (z.B. Azure-Postgres).
+    - ``DB_PORT`` (int): Portnummer, standardmäßig 5432.
+    - ``DB_NAME`` (str): Name der Datenbank (z.B. ``"house_prices"``).
+    - ``DB_USER`` (str): Datenbank-Benutzername.
+    - ``DB_PASSWORD`` (str): Passwort des Benutzers.
+    - ``DB_SSLMODE`` (str): SSL-Modus, z.B. ``"require"`` (Azure)
+      oder ``"disable"`` (lokal ohne SSL).
+
+    Wird keine Umgebungsvariable gesetzt, greifen Default-Werte
+    (lokaler PostgreSQL mit User/Passwort ``house`` und DB
+    ``house_prices``).
 
     Returns
     -------
@@ -39,6 +73,7 @@ def get_connection():
         dbname=DB_NAME,
         user=DB_USER,
         password=DB_PASSWORD,
+        sslmode=DB_SSLMODE,
     )
     return conn
 
@@ -119,7 +154,11 @@ def insert_prediction(kaggle_id: int, predicted_price: float) -> None:
         conn.close()
 
 
-def insert_predictions(kaggle_ids, predicted_prices, model_id: int | None = None) -> int:
+def insert_predictions(
+    kaggle_ids: Iterable[int],
+    predicted_prices: Iterable[float],
+    model_id: int | None = None,
+) -> int:
     """
     Fügt mehrere Vorhersagen in einem Schritt in die Tabelle ``predictions`` ein.
 
@@ -232,7 +271,7 @@ def init_models_table():
             mare_test DOUBLE PRECISION,
             cv_rmse_mean DOUBLE PRECISION,
             cv_rmse_std DOUBLE PRECISION,
-            hyperparams JSONB,              -- NEU
+            hyperparams JSONB,
             is_champion BOOLEAN NOT NULL DEFAULT FALSE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );

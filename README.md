@@ -3,13 +3,25 @@
 End-to-End Machine-Learning-Projekt zur Vorhersage von Hauspreisen  
 (basierend auf dem Kaggle-Datensatz *House Prices – Advanced Regression Techniques*).
 
-Ziel des Projekts:
+---
 
-- saubere ML-Pipeline mit `scikit-learn` und `PyTorch`
-- reproduzierbares Training inkl. Cross-Validation
-- Model Registry in PostgreSQL
-- Prediction-Store in PostgreSQL
-- Docker-Setup, das sich später in eine Cloud-Umgebung (AWS) heben lässt
+## TL;DR
+
+- **Ziel**: Saubere ML-Pipeline (scikit-learn + PyTorch) für Hauspreise inkl. Model Registry & Prediction-Store in PostgreSQL.
+- **Status**:
+  - Training & Prediction laufen lokal (Python + venv).
+  - Modell-Metadaten & Predictions werden in **Azure PostgreSQL Flexible Server** gespeichert (Region `northeurope`, via Terraform).
+- **DB-Schema**:
+  - `models` – Modell-Registry (Name, Version, Metriken, Hyperparameter, Champion-Flag).
+  - `predictions` – Vorhersagen (`kaggle_id`, `predicted_price`, `model_id`, `created_at`).
+  - `v_predictions_with_model` – Join aus `predictions` und `models` (für Analysen/BI).
+- **Infra**:
+  - Terraform-Konfiguration in `terraform/`.
+  - ENV-basierte DB-Konfiguration in `src/db.py`.
+  - Utility-Skripte in `scripts/` (Schema anwenden, DB testen, Sample anzeigen).
+- **Nächste Schritte**:
+  - BI-Tool (Tableau / Power BI) direkt auf die Azure-Postgres-DB hängen.
+  - Optional: Webservice (z.B. FastAPI) für Online-Prediction.
 
 ---
 
@@ -17,25 +29,35 @@ Ziel des Projekts:
 
     .
     ├─ src/
-    │  ├─ data.py            # Laden der Rohdaten
+    │  ├─ data.py            # Laden der Rohdaten (train/test)
     │  ├─ features.py        # Missing-Value-Treatment & Feature Engineering
     │  ├─ preprocessing.py   # ColumnTransformer & Feature-Listen
     │  ├─ models.py          # klassische ML-Modelle (Linear, RF, HistGBR)
     │  ├─ nn_models.py       # TorchMLPRegressor + Pipeline
-    │  ├─ db.py              # PostgreSQL-Anbindung (models & predictions)
+    │  ├─ db.py              # PostgreSQL-Anbindung (models & predictions, via ENV)
     │  └─ __init__.py
-    ├─ train.py              # Trainiert alle Modelle, wählt Champion, loggt in DB
-    ├─ predict.py            # Lädt Champion, erzeugt Predictions & schreibt in DB
+    ├─ scripts/
+    │  ├─ __init__.py
+    │  ├─ test_db_connection.py  # Healthcheck der DB-Verbindung
+    │  ├─ init_schema.py         # wendet sql/schema.sql auf die DB an
+    │  ├─ show_db_sample.py      # zeigt Beispielzeilen aus models/View
+    │  └─ set_env_azure_db.ps1   # setzt DB_* ENV-Variablen für Azure-Postgres
     ├─ sql/
     │  └─ schema.sql         # vollständiges DB-Schema (models, predictions, Indizes, View)
+    ├─ terraform/
+    │  ├─ main.tf            # Azure-Ressourcen (RG, PostgreSQL Flexible Server, Firewall)
+    │  ├─ variables.tf       # Terraform-Variablen (Projektname, Region, DB-Name, etc.)
+    │  ├─ outputs.tf         # Terraform-Outputs (FQDN, User, DB-Name, Beispiel-DSN)
+    │  └─ .terraform.lock.hcl
     ├─ docs/
-    │  ├─ architecture.md    # Architektur-Übersicht (Datenfluss, Komponenten)
+    │  ├─ architecture.md    # Architektur-Übersicht (Datenfluss, Komponenten, Cloud)
     │  └─ experiments.md     # Experiment-Log (Modelle & Ergebnisse)
     ├─ models/               # gespeicherte Champion-Modelle (.joblib)
     ├─ predictions/          # Predictions als CSV
     ├─ logs/                 # Logging (z.B. train.log)
     ├─ plots/                # Trainingsplots (z.B. TorchMLP-Losskurven)
     ├─ requirements.txt
+    ├─ pyproject.toml
     ├─ Dockerfile
     ├─ .dockerignore
     └─ .gitignore
@@ -46,71 +68,105 @@ Ziel des Projekts:
 
 ### Dateibasiert
 
-- Basis: Kaggle „House Prices: Advanced Regression Techniques“
-- Train-Datei: `data/raw/train.csv` (lokal, nicht versioniert)
-- Test-Datei (für Kaggle-Submission): `data/raw/test.csv` (lokal, nicht versioniert)
-- Predictions: `predictions/predictions.csv` (wird von `predict.py` erzeugt)
+- Datensatz: Kaggle „House Prices: Advanced Regression Techniques“.
+- Rohdaten (nicht im Repo):
+  - `data/raw/train.csv`
+  - `data/raw/test.csv`
+- Artefakte:
+  - `predictions/predictions.csv` (von `predict.py` erzeugt)
+  - `models/*.joblib` (Champion-Modelle)
+  - `logs/`, `plots/` (Training-Plots, Logs)
 
-> Hinweis: `data/`, `models/`, `logs/`, `plots/` und `predictions` sind in
-> `.gitignore` und `.dockerignore` eingetragen, da es sich um Artefakte bzw.
-> lokale Daten handelt.
+Folgende Verzeichnisse sind bewusst in `.gitignore` und `.dockerignore` eingetragen:
+
+- `data/`
+- `models/`
+- `logs/`
+- `plots/`
+- `predictions/`
 
 ### Datenbank (PostgreSQL)
 
-- Läuft in einem Docker-Container (`postgres:16`)
-- Datenbank: `house_prices`
-- Tabellen:
-  - `models`  
-    → Model Registry (Name, Version, Pfad zur `.joblib`, Metriken, Hyperparameter, Champion-Flag)
-  - `predictions`  
-    → Prediction-Store (`kaggle_id`, `predicted_price`, `model_id`, `created_at`)
-- View:
-  - `v_predictions_with_model`  
-    → Join von `predictions` und `models` (z.B. für BI/Monitoring)
-- Vollständiges Schema: `sql/schema.sql`
+Das Projekt unterstützt zwei Modi:
+
+1. **Lokal (Docker-Postgres)**  
+   - DB: `house_prices`  
+   - User/Passwort z.B.: `house` / `house`  
+   - Host: `localhost`, Port: `5432`  
+   - SSL: deaktiviert (`DB_SSLMODE=disable`)
+
+2. **Cloud (Azure PostgreSQL Flexible Server)**  
+   - Region: `northeurope`  
+   - DB: `house_prices`  
+   - Tabellen:
+     - `models` – Modell-Registry (Name, Version, Pfad zur `.joblib`, Metriken, Hyperparameter, Champion-Flag)
+     - `predictions` – Prediction-Store (`kaggle_id`, `predicted_price`, `model_id`, `created_at`)
+   - View:
+     - `v_predictions_with_model` – Join von `predictions` und `models` für Analysen/BI
+
+Die Verbindung wird in `src/db.py` über Umgebungsvariablen gesteuert:
+
+- `DB_HOST` – Hostname/FQDN (lokal: `localhost`, Azure: FQDN des Servers)
+- `DB_PORT` – Standard: `5432`
+- `DB_NAME` – z.B. `house_prices`
+- `DB_USER` – DB-User (lokal: `house`, Azure: z.B. `hpadmin`)
+- `DB_PASSWORD` – Passwort
+- `DB_SSLMODE` – `"require"` (Azure) oder `"disable"` (lokal)
+
+Wenn keine ENV-Variablen gesetzt sind, greifen lokale Defaults (Postgres auf `localhost` mit `house`/`house`, `DB_SSLMODE=require`).
 
 ---
 
-## Pipeline (kurz)
+## Pipeline
 
-1. **Laden & Preprocessing**  
-   - Missing Values: None/Median/Modus-Strategien (siehe `features.py`)
-   - Feature Engineering: `TotalSF`, `TotalBath`, `HouseAge`, etc.
-   - Ordinale Features: Mapping auf `int` (z.B. Ex/Gd/TA/Fa/Po → 5…1)
-   - `ColumnTransformer` + `OneHotEncoder` für kategoriale Features
+### Preprocessing & Features
 
-2. **Modelle**
-   - `LinearRegression` (+ optional log-Target via `TransformedTargetRegressor`)
-   - `RandomForestRegressor`
-   - `HistGradientBoostingRegressor`
-   - `TorchMLPRegressor` (PyTorch-Multi-Layer-Perceptron, sklearn-kompatibel)
+- Laden der Trainingsdaten über `src/data.py`.
+- Feature Engineering und Missing-Value-Treatment in `src/features.py`:
+  - z.B. `TotalSF`, `TotalBath`, `HouseAge`, `RemodAge`, `TotalPorchSF`.
+  - Missing Values je nach Typ (None/Median/Modus).
+- Ordinale Features werden auf Integer gemappt (Ex/Gd/TA/Fa/Po → 5…1 usw.).
+- `src/preprocessing.py` baut einen `ColumnTransformer`:
+  - `OneHotEncoder(handle_unknown="ignore")` für kategoriale Features.
+  - numerische/ordinale Features werden durchgereicht (`remainder="passthrough"`).
 
-3. **Evaluation**
-   - Train/Test-Split (80/20)
-   - Cross-Validation (5-fold)
-   - Metriken:
-     - R²
-     - RMSE (in Euro)
-     - MARE / RRMSE (relative Fehler in %)
+### Modelle
 
-4. **Persistenz**
-   - Champion-Modell wird als `.joblib` unter `models/` gespeichert
-   - Eintrag in `models` (Postgres) inkl. Metriken und Hyperparametern
-   - `predict.py` schreibt Vorhersagen zusätzlich in `predictions` (Postgres)
+- `src/models.py`:
+  - `LinearRegression`
+  - `RandomForestRegressor`
+  - `HistGradientBoostingRegressor`
+- `src/nn_models.py`:
+  - `TorchMLPRegressor` (PyTorch-MLP, sklearn-kompatibel)
+- Alle Modelle werden als Pipelines gebaut:  
+  `preprocess → (optional StandardScaler) → Regressor`  
+  und optional in `TransformedTargetRegressor` gepackt (`log`-Target).
 
----
+### Training (`train.py`)
 
-## Aktueller Stand (kurze Summary)
+- liest Trainingsdaten, baut Preprocessor.
+- trainiert nacheinander:
+  - `LinearRegression` (+ `_log`)
+  - `RandomForest` (+ `_log`)
+  - `HistGBR` (+ `_log`)
+  - `TorchMLP`
+- für jedes Modell:
+  - 5-fold Cross-Validation (RMSE)
+  - Test-Set-Evaluation (R², RMSE, MARE/RRMSE)
+- wählt den **Champion** anhand CV-RMSE (aktuell: `HistGBR_log`).
+- trainiert den Champion auf allen Daten.
+- speichert das Champion-Modell als `.joblib` in `models/`.
+- schreibt einen Eintrag in die Tabelle `models` (Postgres).
 
-- Bester CV-Performer: **HistGBR mit log-Target** (`HistGBR_log`)
-- Typischer Fehler:
-  - ca. 9–10 % relativer Fehler (MARE),
-  - RMSE ~ 29–30k € (je nach Modell)
-- TorchMLP:
-  - R² ~ 0.87,
-  - aber schlechtere relative Fehler und höhere CV-RMSE als HistGBR_log.
+### Prediction (`predict.py`)
 
-Details zu Experimenten und Metriken stehen in `docs/experiments.md`.
+- ermittelt das aktuelle Champion-Modell (aus DB + Dateisystem).
+- lädt das Modell (`.joblib`).
+- liest `data/raw/test.csv`.
+- erzeugt Predictions.
+- schreibt:
+  - `predictions/predictions.csv` (für Kaggle).
+  - alle Predictions in die Tabelle `predictions` (inkl. `model_id` des Champions).
 
 ---
 
@@ -126,7 +182,15 @@ Details zu Experimenten und Metriken stehen in `docs/experiments.md`.
 
     pip install -r requirements.txt
 
-### PostgreSQL in Docker
+Optional (für „sauberes“ Packaging):
+
+    pip install -e .
+
+Dadurch wird `pyproject.toml` genutzt und das Projekt als Package installiert; `src` ist dann als Package verfügbar und `python -m scripts.<name>` funktioniert wie geplant.
+
+---
+
+### Lokale PostgreSQL (Docker, optional)
 
     docker run --name house-price-postgres ^
       -e POSTGRES_USER=house ^
@@ -137,76 +201,94 @@ Details zu Experimenten und Metriken stehen in `docs/experiments.md`.
 
 (unter Linux/Mac `^` durch `\` ersetzen)
 
-Die Verbindungseinstellungen sind in `src/db.py` hinterlegt:
+Beispiel-ENV für lokale DB:
 
-- Host: `localhost`
-- Port: `5432`
-- DB: `house_prices`
-- User: `house`
-- Passwort: `house`
+    set DB_HOST=localhost
+    set DB_PORT=5432
+    set DB_NAME=house_prices
+    set DB_USER=house
+    set DB_PASSWORD=house
+    set DB_SSLMODE=disable
 
----
-
-## Docker-Image für das Training (optional)
-
-Das Projekt bringt ein einfaches Dockerfile für das Training mit.  
-Voraussetzung: Die PostgreSQL-Instanz ist vom Container aus erreichbar.
-
-    # Image bauen
-    docker build -t house-price-train .
-
-    # Training im Container ausführen
-    docker run --rm house-price-train
-
-(Standard-CMD im Container ist `python train.py`.)
+(bzw. PowerShell: `$env:DB_HOST = "localhost"` usw.)
 
 ---
 
-## Wie ausführen
+### Azure PostgreSQL (Terraform)
+
+1. `az login` ausführen und Subscription auswählen.
+2. In `terraform/`:
+
+       terraform init
+       terraform apply -var "client_ip=<DEINE_ÖFFENTLICHE_IP>"
+
+   Terraform legt an:
+
+   - Resource Group `house-price-rg`
+   - PostgreSQL Flexible Server `house-price-psql` (Region `northeurope`)
+   - Datenbank `house_prices`
+   - Firewall-Regel für deine IP
+
+3. Wichtige Outputs:
+
+       terraform output -raw postgres_fqdn
+       terraform output -raw postgres_admin_username
+       terraform output -raw postgres_admin_password
+       terraform output -raw postgres_database_name
+
+4. Diese Werte werden in `scripts/set_env_azure_db.ps1` eingetragen.  
+   Pro Session genügt dann:
+
+       .\.venv\Scripts\Activate.ps1
+       .\scripts\set_env_azure_db.ps1
+
+5. Schema auf Azure anwenden:
+
+       python -m scripts.init_schema
+
+6. Verbindung / Inhalt prüfen:
+
+       python -m scripts.test_db_connection
+       python -m scripts.show_db_sample
+
+---
+
+## Usage
 
 ### Training
 
     python train.py
 
 - trainiert alle konfigurierten Modelle,
-- berechnet Test- und CV-Metriken,
-- wählt einen Champion (nach CV-RMSE),
-- trainiert den Champion auf allen Daten,
-- speichert ihn als `.joblib` unter `models/`,
-- trägt ihn in der Tabelle `models` (PostgreSQL) ein (inkl. Hyperparametern).
+- berechnet Metriken (Test + CV),
+- wählt einen Champion,
+- speichert das Modell (`models/`),
+- trägt es in der DB-Tabelle `models` ein.
 
-### Predictions
+### Prediction
 
     python predict.py
 
-- lädt das aktuelle Champion-Modell aus `models/`,
+- lädt den Champion,
 - erzeugt Vorhersagen für den Testdatensatz,
 - schreibt `predictions/predictions.csv`,
-- fügt alle Vorhersagen in die Tabelle `predictions` ein
-  (inkl. Verweis auf `models.id` des Champions).
+- speichert alle Predictions in der DB-Tabelle `predictions`.
 
 ---
 
-## Roadmap / weitere Planung
+## Roadmap
 
-Geplante Erweiterungen:
+- **Kurzfristig**
+  - Tableau / Power BI direkt auf Azure-Postgres (`models`, `predictions`, `v_predictions_with_model`).
+  - Kleine Auswertungs-/Monitoring-Dashboards.
 
-- **Cloud (AWS)**  
-  - RDS-Postgres  
-  - Modellablage in S3  
-  - Container-Deployment (z.B. ECS/Fargate) für Training und/oder Prediction-API
+- **Mittelfristig**
+  - FastAPI-Service als Web-API:
+    - Endpunkte für aktuelle Champion-Infos.
+    - Online-Predictions mit DB-Logging.
+  - Containerisierung (Docker) und Deployment z.B. auf Azure Container Apps.
 
-- **API-Layer**  
-  - z.B. FastAPI-Service, der das Champion-Modell als REST-Endpunkt bereitstellt
-
-- **Terraform**  
-  - IaC-Definition der Cloud-Ressourcen (DB, Compute, S3)
-
-- **BI / Visualisierung**  
-  - Tableau an PostgreSQL anbinden  
-  - Dashboards auf Basis von `models`, `predictions` und `v_predictions_with_model`
-
-- **Erweiterte Experimente**  
-  - systematisches Hyperparameter-Tuning  
-  - zusätzliche Feature-Engineering-Schritte  
-  - weitere Modellklassen (XGBoost/LightGBM)
+- **Langfristig**
+  - Erweiterte Hyperparameter-Suche.
+  - Weitere Modellklassen (z.B. XGBoost/LightGBM).
+  - CI/CD-Pipeline für Training, Evaluation, Deployment.

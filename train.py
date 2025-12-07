@@ -10,11 +10,7 @@
 from src.data import load_train_data
 from src.features import missing_value_treatment, new_feature_engineering, ordinal_mapping
 from src.preprocessing import build_preprocessor
-from src.models import (
-    build_linear_regression_model,
-    build_random_forest_model,
-    build_histogram_based_model,
-)
+from src.models import build_linear_regression_model, build_random_forest_model, build_histogram_based_model
 from src.nn_models import build_torch_mlp_model
 from src.db import init_models_table, insert_model
 

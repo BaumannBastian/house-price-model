@@ -33,3 +33,22 @@ logs/
 
 # predicted files
 predictions/
+
+
+
+# ------------------------------
+# Python Build-/Packaging-Artefakte
+# ------------------------------
+
+house_price_model.egg-info/
+build/
+dist/
+
+
+# ------------------------------
+# Terraform State & Cache
+# ------------------------------
+
+**/.terraform/
+*.tfstate
+*.tfstate.backup
