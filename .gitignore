@@ -34,7 +34,8 @@ logs/
 # predicted files
 predictions/
 
-
+# Lokale Secrets
+scripts/set_env_azure_db.ps1
 
 # ------------------------------
 # Python Build-/Packaging-Artefakte

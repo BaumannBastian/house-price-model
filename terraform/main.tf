@@ -60,6 +60,8 @@ resource "azurerm_postgresql_flexible_server" "db" {
   geo_redundant_backup_enabled  = false
   public_network_access_enabled = true
 
+  zone = "1"
+
   tags = {
     project     = var.project_name
     environment = var.environment
