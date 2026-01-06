@@ -2,17 +2,46 @@
 # train.py
 #
 # In dieser Python-Datei werden die Trainingsdaten geladen, Features
-# erzeugt, mehrere sklearn- und PyTorch-Modelle trainiert und verglichen.
-# Das beste Modell (Champion) wird gespeichert und seine Metadaten in der
-# PostgreSQL-Datenbank registriert.
+# erzeugt und Modelle trainiert.
+#
+# Modi
+# ----
+# 1) train-only:
+#    - jedes Modell wird einmal auf dem kompletten train.csv trainiert
+#    - jedes Modell wird als .joblib gespeichert
+#    - pro Modell wird eine Zeile in 'models' geschrieben (file_path gesetzt)
+#
+# 2) analysis:
+#    - gemeinsamer Train/Test Split (Holdout) für Test-Metriken
+#    - gemeinsamer KFold Split (gleiche Folds für alle Modelle)
+#    - pro Modell: OOF/CV Predictions werden in 'train_cv_predictions' gespeichert
+#    - Champion wird per cv_rmse_mean bestimmt
+#    - Champion wird auf Full-Data neu gefittet und gespeichert (file_path)
 # ------------------------------
 
 from src.data import load_train_data
-from src.features import missing_value_treatment, new_feature_engineering, ordinal_mapping
+from src.features import (
+    missing_value_treatment,
+    new_feature_engineering,
+    ordinal_mapping,
+)
 from src.preprocessing import build_preprocessor
-from src.models import build_linear_regression_model, build_random_forest_model, build_histogram_based_model
+from src.models import (
+    build_linear_regression_model,
+    build_random_forest_model,
+    build_histogram_based_model,
+)
 from src.nn_models import build_torch_mlp_model
-from src.db import init_models_table, insert_model
+from src.db import (
+    init_db,
+    init_predictions_view,
+    init_models_table,
+    init_train_cv_predictions_table,
+    insert_model,
+    insert_train_cv_predictions,
+    set_champion_model,
+    update_model_file_path,
+)
 
 import argparse
 import logging
@@ -22,36 +51,33 @@ import numpy as np
 
 from datetime import datetime
 from pathlib import Path
-from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.model_selection import KFold, train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
+
+
+# Optional: nur falls du es im Projekt hast (typischerweise in src/data.py)
+try:
+    from src.data import load_test_data  # type: ignore
+except Exception:
+    load_test_data = None
 
 
 def parse_args() -> argparse.Namespace:
     """
     Parst Kommandozeilenargumente für das Trainingsskript.
-
-    Unterstützte Flags
-    ------------------
-    --debug :
-        Aktiviert detaillierteres Logging (DEBUG-Level).
-    --nn-verbose :
-        Gibt während des TorchMLP-Trainings den Loss auf der Konsole aus.
-    --nn-plot-loss :
-        Speichert nach dem TorchMLP-Training eine Loss-Kurve als PNG
-        im Ordner ``plots``.
-
-    Parameters
-    ----------
-    None
-
-    Returns
-    -------
-    argparse.Namespace
-        Namespace mit den Attributen ``debug``, ``nn_verbose`` und
-        ``nn_plot_loss``.
     """
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--mode",
+        choices=["analysis", "train-only"],
+        default="train-only",
+        help="analysis = CV + OOF speichern, train-only = nur Full-Train + Modelle speichern",
+    )
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--cv-splits", type=int, default=5)
+
     parser.add_argument(
         "--nn-verbose",
         action="store_true",
@@ -60,331 +86,345 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--nn-plot-loss",
         action="store_true",
-        help="Loss-Kurve des TorchMLP nach dem Training als PNG speichern",
+        help="TorchMLP Losskurve nach Training als PNG speichern (nur Full-Fit)",
     )
+
     return parser.parse_args()
 
 
-def setup_logging(debug: bool) -> logging.Logger:
+def setup_logging(debug: bool = False) -> logging.Logger:
     """
-    Richtet konsistentes Logging für Konsole und Logdatei ein.
+    Richtet das Logging für das Trainingsskript ein.
 
-    Es wird ein ``logs/``-Verzeichnis erstellt, ein Root-Logger
-    konfiguriert und sowohl ein Konsolen- als auch ein Datei-Handler
-    (``logs/train.log``) registriert. Zusätzlich werden Python-Warnings
-    in das Logging-System umgeleitet.
-
-    Im Debug-Modus (``debug=True``) werden alle Meldungen auf DEBUG-Level
-    ausgegeben, ansonsten auf INFO-Level. Bestimmte sklearn-
-    ``FutureWarning``-Meldungen werden im Normalmodus unterdrückt.
-
-    Parameters
-    ----------
-    debug : bool
-        Ob das Skript im Debug-Modus läuft. Beeinflusst Log-Level und
-        Behandlung von Warnings.
-
-    Returns
-    -------
-    logging.Logger
-        Modul-Logger für dieses Skript, der an den konfigurierten
-        Root-Logger angebunden ist.
+    Wichtig:
+    - force=True verhindert doppelte Handler / doppelte Ausgabe.
     """
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-
-    # Root-Logger holen & Level setzen
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG if debug else logging.INFO)
-
-    fmt = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        force=True,
     )
+    return logging.getLogger("train")
 
-    # Alte Handler entfernen, falls mehrfach aufgerufen
-    if root.handlers:
-        root.handlers.clear()
 
-    # Konsole
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG if debug else logging.INFO)
-    console_handler.setFormatter(fmt)
+def _extract_hyperparams(model) -> dict:
+    """
+    Extrahiert Hyperparameter des inneren Regressors (Pipeline-Step "regressor").
+    """
+    try:
+        base = model.regressor
+        inner_reg = base.named_steps["regressor"]
+        return inner_reg.get_params(deep=False)
+    except Exception:
+        return {}
 
-    # Datei
-    file_handler = logging.FileHandler(
-        log_dir / "train.log",
-        mode="w",
-        encoding="utf-8",
-    )
-    file_handler.setLevel(logging.DEBUG)  # immer alles ins File
-    file_handler.setFormatter(fmt)
 
-    root.addHandler(console_handler)
-    root.addHandler(file_handler)
+def _maybe_set_n_jobs_max(model) -> None:
+    """
+    Setzt n_jobs=-1 für Modelle, die das unterstützen (beschleunigt CV auf lokalen Maschinen).
+    """
+    try:
+        inner = model.regressor.named_steps["regressor"]
+        params = inner.get_params(deep=False)
+        if "n_jobs" in params:
+            inner.set_params(n_jobs=-1)
+    except Exception:
+        pass
 
-    # Warnings in Logging umleiten
-    logging.captureWarnings(True)
 
-    if debug:
-        # im Debug-Mode: Warnings normal loggen
-        warnings.filterwarnings("default")
-    else:
-        # im normalen Mode: die sklearn-Pipeline-FutureWarnings unterdrücken
-        warnings.filterwarnings(
-            "ignore",
-            category=FutureWarning,
-            message="This Pipeline instance is not fitted yet.*",
-        )
+def _oof_predictions_from_splits(
+    logger: logging.Logger,
+    model_name: str,
+    builder,
+    preprocessor,
+    use_log_target: bool,
+    X_train,
+    Y_train,
+    splits,
+    nn_verbose: bool = False,
+) -> tuple[np.ndarray, float, float]:
+    """
+    Berechnet Out-of-Fold (OOF) Predictions auf Basis vorgegebener CV-Splits.
 
-    # Modul-Logger zurückgeben
-    return logging.getLogger(__name__)
+    Wichtig:
+    - splits werden außerhalb einmal erstellt und für alle Modelle wiederverwendet,
+      damit jedes Modell exakt die gleichen Folds sieht.
+    """
+    oof_pred = np.empty(len(X_train), dtype=float)
+    oof_pred[:] = np.nan
+
+    fold_rmses = []
+    n_folds = len(splits)
+
+    for fold_idx, (tr_idx, val_idx) in enumerate(splits, start=1):
+        logger.info("[%s] CV fold %d/%d: fit", model_name, fold_idx, n_folds)
+
+        model_fold = builder(preprocessor, use_log_target=use_log_target)
+        _maybe_set_n_jobs_max(model_fold)
+
+        if nn_verbose:
+            try:
+                inner_mlp = model_fold.regressor.named_steps["regressor"]
+                inner_mlp.verbose = True
+            except Exception:
+                pass
+
+        model_fold.fit(X_train.iloc[tr_idx], Y_train[tr_idx])
+        pred_val = model_fold.predict(X_train.iloc[val_idx])
+
+        oof_pred[val_idx] = pred_val
+
+        rmse_fold = float(np.sqrt(mean_squared_error(Y_train[val_idx], pred_val)))
+        fold_rmses.append(rmse_fold)
+
+        logger.info("[%s] CV fold %d/%d: RMSE = %.2f", model_name, fold_idx, n_folds, rmse_fold)
+
+    if np.isnan(oof_pred).any():
+        raise RuntimeError("OOF-Predictions enthalten NaNs – CV Splits haben nicht alle Indizes befüllt.")
+
+    return oof_pred, float(np.mean(fold_rmses)), float(np.std(fold_rmses))
 
 
 def main() -> None:
     """
-    Hauptfunktion des Trainingsskripts.
-
-    Ablauf
-    ------
-    1. Parst Kommandozeilenargumente und richtet das Logging ein.
-    2. Lädt den Kaggle-Train-Datensatz und trennt Target (``SalePrice``)
-       von den Features.
-    3. Führt Missing-Value-Treatment, Feature-Engineering und Ordinal-Encoding
-       für die Input-Features durch.
-    4. Splittet die Daten in Trainings- und Testset.
-    5. Baut verschiedene Modelle (Linear Regression, Random Forest,
-       Histogram-Gradient-Boosting, TorchMLP) jeweils mit/ohne Log-Target.
-    6. Führt Cross-Validation und Test-Set-Evaluation durch und bestimmt
-       ein Champion-Modell basierend auf dem CV-RMSE.
-    7. Trainiert den Champion auf allen Daten, speichert ihn als ``.joblib``
-       und legt einen Eintrag in der Tabelle ``models`` in PostgreSQL an.
-
-    Parameters
-    ----------
-    None
-
-    Returns
-    -------
-    None
-        Die Funktion hat keinen Rückgabewert. Ergebnisse werden über
-        Logging, Konsolenausgabe, gespeicherte Modell-Dateien und
-        Datenbankeinträge sichtbar.
+    Führt train.py im gewählten Modus aus.
     """
-    # Kommandozeilenargumente parsen und Logging einrichten
+    warnings.filterwarnings("ignore", category=UserWarning)
+
     args = parse_args()
     logger = setup_logging(args.debug)
 
+    # DB Grundsetup (idempotent)
+    init_models_table()
+    init_db()
+    try:
+        init_predictions_view()
+    except Exception:
+        logger.warning("Konnte v_predictions_with_model nicht initialisieren (ok).")
+
+    run_version = datetime.now().strftime("%Y%m%d-%H%M%S")
+
     # Rohdaten laden
-    df = load_train_data("data/raw/train.csv")
+    df = load_train_data()
 
-    target_col = "SalePrice"
-    Y = df[target_col].copy()
-    X_raw = df.drop(columns=[target_col])
+    kaggle_ids = df["Id"].to_numpy()
+    Y = df["SalePrice"].to_numpy()
 
-    # Feature-Pipeline: Missing Values → neue Features → Ordinal Mapping
+    X_raw = df.drop(columns=["Id", "SalePrice"])
+
     X = missing_value_treatment(X_raw)
     X = new_feature_engineering(X)
     X = ordinal_mapping(X)
 
-    # Train/Test-Split
-    X_train, X_test, Y_train, Y_test = train_test_split(
-        X,
-        Y,
-        test_size=0.2,
-        random_state=42,
-    )
-
-    logger.debug("X_train shape: %s, X_test shape: %s", X_train.shape, X_test.shape)
-    logger.debug("Y_train shape: %s, Y_test shape: %s", Y_train.shape, Y_test.shape)
-
-    # Preprocessor aus den Trainingsdaten bauen
-    preprocessor = build_preprocessor(X_train)
-
-    logger.info("Preprocessor gebaut.")
-    logger.info("Starte Training.")
-
-    # Modelle bauen, trainieren und vergleichen
     configs = [
-        ("LinearRegression",      build_linear_regression_model,    False),
-        ("LinearRegression_log",  build_linear_regression_model,    True),
-        ("RandomForest",          build_random_forest_model,        False),
-        ("RandomForest_log",      build_random_forest_model,        True),
-        ("HistGBR",               build_histogram_based_model,      False),
-        ("HistGBR_log",           build_histogram_based_model,      True),
-        ("TorchMLP",              build_torch_mlp_model,            False),
-        # ("TorchMLP_log",          build_torch_mlp_model,            True),
+        ("LinearRegression", build_linear_regression_model, False),
+        ("LinearRegression_log", build_linear_regression_model, True),
+        ("RandomForest", build_random_forest_model, False),
+        ("RandomForest_log", build_random_forest_model, True),
+        ("HistGBR", build_histogram_based_model, False),
+        ("HistGBR_log", build_histogram_based_model, True),
+        ("TorchMLP", build_torch_mlp_model, False),
+        ("TorchMLP_log", build_torch_mlp_model, True),
     ]
 
-    results: list[tuple[str, float, float, float, float, float, float, float]] = []
+    # ---------------------------------------------------------------------
+    # MODE: train-only
+    # ---------------------------------------------------------------------
+    if args.mode == "train-only":
+        logger.info("Mode: train-only")
+        logger.info("Baue Preprocessor auf Full-Data.")
+        preprocessor_full = build_preprocessor(X)
 
-    best_cv_rmse = float("inf")
-    best_config: tuple[str, callable, bool] | None = None
+        models_dir = Path("models")
+        models_dir.mkdir(exist_ok=True)
 
-    for name, builder, use_log in configs:
-        logger.info("=== Train %s (use_log_target=%s) ===", name, use_log)
+        for name, builder, use_log in configs:
+            logger.info("=== Train-only: %s (use_log_target=%s) ===", name, use_log)
 
-        model = builder(preprocessor, use_log_target=use_log)
+            model = builder(preprocessor_full, use_log_target=use_log)
+            _maybe_set_n_jobs_max(model)
 
-        # Falls TorchMLP und --nn-verbose: Verbose aktivieren
-        if args.nn_verbose and name.startswith("TorchMLP"):
-            # TTR → Pipeline → TorchMLPRegressor
-            inner_mlp = model.regressor.named_steps["regressor"]
-            inner_mlp.verbose = True
+            if args.nn_verbose and name.startswith("TorchMLP"):
+                try:
+                    inner_mlp = model.regressor.named_steps["regressor"]
+                    inner_mlp.verbose = True
+                except Exception:
+                    pass
 
-        print(f"\n=== Train {name} (use_log_target={use_log}) ===")
+            model.fit(X, Y)
 
-        # 5a. Cross-Validation auf dem Trainingsset
-        cv_scores = cross_val_score(
-            model,
-            X_train,
-            Y_train,
-            cv=5,
-            scoring="neg_root_mean_squared_error",
-            n_jobs=-1,
-        )
-        rmse_cv = -cv_scores  # Vorzeichen umdrehen
-        mean_cv_rmse = rmse_cv.mean()
+            out_path = models_dir / f"{name}_{run_version}.joblib"
+            joblib.dump(model, out_path)
 
-        if mean_cv_rmse < best_cv_rmse:
-            best_cv_rmse = mean_cv_rmse
-            best_config = (name, builder, use_log)
+            hyperparams = _extract_hyperparams(model)
 
-        print(f"{name}: CV-RMSE = {rmse_cv.mean():.2f} ± {rmse_cv.std():.2f}")
+            model_id = insert_model(
+                name=name,
+                version=run_version,
+                file_path=str(out_path),
+                r2_test=None,
+                rmse_test=None,
+                mare_test=None,
+                mre_test=None,
+                cv_rmse_mean=None,
+                cv_rmse_std=None,
+                max_abs_train_error=None,
+                hyperparams=hyperparams,
+                is_champion=False,  # train-only setzt keinen Champion um
+            )
 
-        # 5b. Training auf dem ganzen Trainingsset
-        model.fit(X_train, Y_train)
+            logger.info("Gespeichert: %s (model_id=%s) -> %s", name, model_id, out_path)
 
-        # 5c. Evaluation auf dem Testset
-        Y_pred = model.predict(X_test)
+        logger.info("Train-only fertig. Alle Modelle gespeichert.")
+        return
 
-        rmse = np.sqrt(mean_squared_error(Y_test, Y_pred))
-        r2 = r2_score(Y_test, Y_pred)
-
-        rel_errors = (Y_pred - Y_test) / Y_test
-
-        mre = rel_errors.mean()                     # signed, mittlerer relativer Fehler
-        mare = np.abs(rel_errors).mean()            # mittlerer absoluter relativer Fehler
-        rrmse = np.sqrt((rel_errors**2).mean())     # relative RMSE
-
-        if args.nn_plot_loss and name.startswith("TorchMLP"):
-            import matplotlib.pyplot as plt  # lokal, um harte Abhängigkeit zu vermeiden
-
-            Path("plots").mkdir(exist_ok=True)
-
-            inner_mlp = model.regressor_.named_steps["regressor"]
-            losses = getattr(inner_mlp, "train_losses_", None)
-
-            if losses is not None and len(losses) > 0:
-                plt.figure()
-                plt.plot(losses)
-                plt.xlabel("Epoch")
-                plt.ylabel("MSE loss")
-                plt.yscale("log")
-                out_path = Path("plots") / f"{name}_loss_curve.png"
-                plt.savefig(out_path, bbox_inches="tight")
-                plt.close()
-                logger.info(
-                    "Losskurve für %s gespeichert unter: %s",
-                    name,
-                    out_path.resolve(),
-                )
-            else:
-                logger.warning(
-                    "Keine train_losses_ für %s gefunden – wurde fit() aufgerufen?",
-                    name,
-                )
-
-        print(f"{name}: Test R² = {r2:.4f}, Test RMSE = {rmse:.2f}")
-        results.append(
-            (name, r2, rmse, mre, mare, rrmse, rmse_cv.mean(), rmse_cv.std())
-        )
-
-    if best_config is None:
-        raise RuntimeError("Kein Champion-Modell gefunden – Config-Liste leer?")
-
-    init_models_table()
-
-    print("\n=== Zusammenfassung ===")
-    for name, r2, rmse, mre, mare, rrmse, rmse_cv_mean, rmse_cv_std in results:
-        print(
-            f"{name:20s} | "
-            f"Test R² = {r2:.4f} | "
-            f"Test RMSE = {rmse:.2f} | "
-            f"MRE = {mre*100:6.2f}% | "
-            f"MARE = {mare*100:5.1f}% | "
-            f"RRMSE = {rrmse*100:5.1f}% | "
-            f"CV-RMSE = {rmse_cv_mean:.2f} ± {rmse_cv_std:.2f}"
-        )
-
-    logger.debug("X shape: %s", X.shape)
-    logger.debug("Y shape: %s", Y.shape)
-
-    champion_name, champion_builder, champion_use_log = best_config
-    print(f"\nChampion (nach CV): {champion_name} (use_log_target={champion_use_log})")
-
-    # Metrics des Champions aus der results-Liste holen
-    champion_row = next(
-        (row for row in results if row[0] == champion_name),
-        None,
-    )
-    if champion_row is None:
-        raise RuntimeError(
-            f"Champion-Metriken für {champion_name} nicht gefunden."
-        )
+    # ---------------------------------------------------------------------
+    # MODE: analysis
+    # ---------------------------------------------------------------------
+    logger.info("Mode: analysis")
+    init_train_cv_predictions_table()
 
     (
-        _,
-        champion_r2,
-        champion_rmse,
-        champion_mre,
-        champion_mare,
-        champion_rrmse,
-        champion_cv_mean,
-        champion_cv_std,
-    ) = champion_row
-
-    # Preprocessor neu auf allen Daten fitten
-    preprocessor_full = build_preprocessor(X)
-
-    champion_model = champion_builder(
-        preprocessor_full,
-        use_log_target=champion_use_log,
+        X_train,
+        X_test,
+        Y_train,
+        Y_test,
+        ids_train,
+        _ids_test,
+    ) = train_test_split(
+        X,
+        Y,
+        kaggle_ids,
+        test_size=0.2,
+        random_state=args.seed,
     )
+
+    logger.info("Baue Preprocessor auf X_train.")
+    preprocessor = build_preprocessor(X_train)
+
+    logger.info("Erzeuge CV-Splits (KFold=%d, seed=%d) – werden für alle Modelle wiederverwendet.", args.cv_splits, args.seed)
+    kf = KFold(n_splits=args.cv_splits, shuffle=True, random_state=args.seed)
+    splits = list(kf.split(X_train))
+
+    results = []
+    best_cv_rmse = float("inf")
+    best_config = None
+    best_model_id = None
+
+    for name, builder, use_log in configs:
+        logger.info("=== Analysis: %s (use_log_target=%s) ===", name, use_log)
+
+        # 1) OOF/CV Predictions (gleiche Folds für alle Modelle)
+        oof_pred, cv_rmse_mean, cv_rmse_std = _oof_predictions_from_splits(
+            logger=logger,
+            model_name=name,
+            builder=builder,
+            preprocessor=preprocessor,
+            use_log_target=use_log,
+            X_train=X_train,
+            Y_train=Y_train,
+            splits=splits,
+            nn_verbose=args.nn_verbose and name.startswith("TorchMLP"),
+        )
+
+        # 2) Fit auf vollem X_train für Holdout-Test-Metriken
+        model = builder(preprocessor, use_log_target=use_log)
+        _maybe_set_n_jobs_max(model)
+
+        if args.nn_verbose and name.startswith("TorchMLP"):
+            try:
+                inner_mlp = model.regressor.named_steps["regressor"]
+                inner_mlp.verbose = True
+            except Exception:
+                pass
+
+        model.fit(X_train, Y_train)
+
+        y_pred_test = model.predict(X_test)
+
+        rmse_test = float(np.sqrt(mean_squared_error(Y_test, y_pred_test)))
+        r2_test = float(r2_score(Y_test, y_pred_test))
+
+        rel_errors_test = (y_pred_test - Y_test) / Y_test
+        mre_test = float(rel_errors_test.mean())
+        mare_test = float(np.abs(rel_errors_test).mean())
+
+        # Für "Worst error" ist OOF sinnvoller als Train-Fit (generalization-like)
+        oof_abs_errors = np.abs(oof_pred - Y_train)
+        max_abs_oof_error = float(oof_abs_errors.max())
+
+        # 3) DB Write: models + train_cv_predictions
+        hyperparams = _extract_hyperparams(model)
+
+        model_id = insert_model(
+            name=name,
+            version=run_version,
+            file_path=None,  # nur Champion bekommt file_path (unten)
+            r2_test=r2_test,
+            rmse_test=rmse_test,
+            mare_test=mare_test,
+            mre_test=mre_test,
+            cv_rmse_mean=cv_rmse_mean,
+            cv_rmse_std=cv_rmse_std,
+            max_abs_train_error=max_abs_oof_error,
+            hyperparams=hyperparams,
+            is_champion=False,
+        )
+
+        inserted = insert_train_cv_predictions(
+            kaggle_ids=ids_train,
+            y_true=Y_train,
+            y_pred_oof=oof_pred,
+            model_id=model_id,
+        )
+
+        logger.info(
+            "[%s] CV-RMSE = %.2f ± %.2f | Test RMSE = %.2f | Test R² = %.4f | OOF rows = %d",
+            name,
+            cv_rmse_mean,
+            cv_rmse_std,
+            rmse_test,
+            r2_test,
+            inserted,
+        )
+
+        # Champion Tracking
+        if cv_rmse_mean < best_cv_rmse:
+            best_cv_rmse = cv_rmse_mean
+            best_config = (name, builder, use_log)
+            best_model_id = model_id
+
+        results.append((name, cv_rmse_mean, cv_rmse_std, rmse_test, r2_test))
+
+    if best_config is None or best_model_id is None:
+        raise RuntimeError("Kein Champion-Modell gefunden – Config-Liste leer?")
+
+    # Champion markieren
+    champion_name, champion_builder, champion_use_log = best_config
+    set_champion_model(best_model_id)
+
+    logger.info("=== Summary (sorted by CV-RMSE) ===")
+    for name, cv_mean, cv_std, rmse_t, r2_t in sorted(results, key=lambda x: x[1]):
+        logger.info("%-18s | CV-RMSE = %10.2f ± %8.2f | Test RMSE = %10.2f | Test R² = %.4f", name, cv_mean, cv_std, rmse_t, r2_t)
+
+    logger.info("Champion: %s (model_id=%s, CV-RMSE=%.2f)", champion_name, best_model_id, best_cv_rmse)
+
+    # Champion auf Full-Data neu fitten und speichern (für predict.py)
+    logger.info("Fit Champion auf Full-Data und speichere Artifact.")
+    preprocessor_full = build_preprocessor(X)
+    champion_model = champion_builder(preprocessor_full, use_log_target=champion_use_log)
+    _maybe_set_n_jobs_max(champion_model)
+
     champion_model.fit(X, Y)
 
     models_dir = Path("models")
     models_dir.mkdir(exist_ok=True)
-    out_path = models_dir / f"{champion_name}.joblib"
-
+    out_path = models_dir / f"{champion_name}_{run_version}.joblib"
     joblib.dump(champion_model, out_path)
 
-    # Hyperparameter des inneren Regressors holen
-    # (gilt für Sklearn-Modelle UND deinen TorchMLP, weil BaseEstimator)
-    base = champion_model.regressor      # TransformedTargetRegressor.regressor
-    inner_reg = base.named_steps["regressor"]  # eigentlicher Estimator
-
-    try:
-        hyperparams = inner_reg.get_params(deep=False)
-    except Exception:
-        hyperparams = {}
-
-    # einfache Versionskennung – z.B. Datum + Modellname
-    version = datetime.now().strftime("%Y%m%d-%H%M%S")
-
-    insert_model(
-        name=champion_name,
-        version=version,
-        file_path=str(out_path),
-        r2_test=champion_r2,
-        rmse_test=champion_rmse,
-        mare_test=champion_mare,
-        cv_rmse_mean=champion_cv_mean,
-        cv_rmse_std=champion_cv_std,
-        is_champion=True,
-        hyperparams=hyperparams,
-    )
-
-    print(f"Champion-Modell gespeichert unter: {out_path}")
+    update_model_file_path(best_model_id, str(out_path))
+    logger.info("Champion gespeichert: %s", out_path)
 
 
 if __name__ == "__main__":

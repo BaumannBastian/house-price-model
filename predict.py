@@ -1,94 +1,133 @@
 # ------------------------------
 # predict.py
 #
-# In dieser Python-Datei wird das Champion-Modell geladen, auf den
-# Kaggle-House-Prices-Testdatensatz angewendet, die Vorhersagen werden
+# In dieser Python-Datei wird ein Modell geladen (standardmäßig der Champion),
+# auf den Kaggle-House-Prices-Testdatensatz angewendet, die Vorhersagen werden
 # als CSV gespeichert und zusätzlich in die PostgreSQL-Datenbank geschrieben.
+#
+# Auswahl des Modells:
+# - default: aktueller Champion aus der DB (models.is_champion = TRUE)
+# - optional: --model-name oder --model-id
 # ------------------------------
 
 from src.features import missing_value_treatment, new_feature_engineering, ordinal_mapping
-from src.db import init_db, insert_predictions, get_current_champion_id
+from src.db import (
+    init_db,
+    insert_predictions,
+    get_current_champion_id,
+    get_model_file_path,
+    get_latest_model_id_by_name,
+)
 
+import argparse
 import pandas as pd
 import joblib
 
 from pathlib import Path
 
 
-MODEL_PATH = Path("models/HistGBR_log.joblib")
-INPUT_PATH = Path("data/raw/test.csv")
-OUTPUT_PATH = Path("predictions/predictions.csv")
+DEFAULT_INPUT_PATH = Path("data/raw/test.csv")
+DEFAULT_OUTPUT_PATH = Path("predictions/predictions.csv")
+
+
+def parse_args() -> argparse.Namespace:
+    """
+    Parst Kommandozeilenargumente für predict.py.
+    """
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--input", type=str, default=str(DEFAULT_INPUT_PATH))
+    parser.add_argument("--output", type=str, default=str(DEFAULT_OUTPUT_PATH))
+
+    parser.add_argument("--model-id", type=int, default=None)
+    parser.add_argument("--model-name", type=str, default=None)
+    parser.add_argument("--version", type=str, default=None)
+
+    parser.add_argument("--skip-db", action="store_true", help="Keine DB Inserts durchführen (nur CSV schreiben).")
+
+    return parser.parse_args()
+
+
+def _resolve_model_id(args: argparse.Namespace) -> int:
+    """
+    Bestimmt, welches Modell verwendet werden soll und gibt model_id zurück.
+    """
+    if args.model_id is not None and args.model_name is not None:
+        raise ValueError("Bitte entweder --model-id oder --model-name verwenden, nicht beides.")
+
+    if args.model_id is not None:
+        return int(args.model_id)
+
+    if args.model_name is not None:
+        model_id = get_latest_model_id_by_name(args.model_name, version=args.version)
+        if model_id is None:
+            raise RuntimeError(f"Kein Modell gefunden für name='{args.model_name}' (version={args.version}).")
+        return int(model_id)
+
+    champion_id = get_current_champion_id()
+    if champion_id is None:
+        raise RuntimeError("Kein Champion in der DB gefunden. Bitte zuerst `python train.py --mode analysis` ausführen.")
+    return int(champion_id)
 
 
 def main() -> None:
     """
-    Führt das Inferenz-Skript für das Champion-Modell aus.
-
-    Ablauf
-    ------
-    1. Lädt das gespeicherte Champion-Modell aus ``MODEL_PATH``.
-    2. Lädt den Kaggle-Testdatensatz aus ``INPUT_PATH``.
-    3. Wendet dieselbe Feature-Pipeline wie im Training an:
-       Missing-Value-Treatment, Feature-Engineering und Ordinal-Encoding.
-    4. Berechnet Vorhersagen für ``SalePrice``.
-    5. Speichert die Predictions als CSV unter ``OUTPUT_PATH``.
-    6. Schreibt dieselben Predictions zusätzlich in die Datenbanktabelle
-       ``predictions`` inkl. optionaler ``model_id`` des Champion-Modells.
-
-    Parameter
-    ----------
-    None
-
-    Returns
-    -------
-    None
-        Die Funktion hat keinen Rückgabewert. Ergebnisse werden auf
-        der Festplatte (CSV) und in der Datenbank persistiert.
+    Führt Inferenz aus und schreibt CSV + optional DB.
     """
-    # Modell laden
-    if not MODEL_PATH.exists():
+    args = parse_args()
+
+    model_id = _resolve_model_id(args)
+    file_path = get_model_file_path(model_id)
+
+    if file_path is None:
         raise FileNotFoundError(
-            f"Modell nicht gefunden unter {MODEL_PATH}. "
-            "Bitte zuerst `python train.py` ausführen."
+            f"Kein file_path in models für model_id={model_id}. "
+            "Bitte das Modell zuerst speichern (train-only oder analysis-Champion)."
         )
-    model = joblib.load(MODEL_PATH)
+
+    model_path = Path(file_path)
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"Model artifact nicht gefunden unter: {model_path}. "
+            "Pfad aus DB stimmt nicht oder Datei wurde gelöscht."
+        )
+
+    # Modell laden
+    model = joblib.load(model_path)
 
     # Eingabedaten laden
-    df = pd.read_csv(INPUT_PATH)
+    input_path = Path(args.input)
+    df = pd.read_csv(input_path)
 
     # Gleiche Feature-Pipeline wie im Training
-    X = missing_value_treatment(df.copy())
+    X_raw = df.drop(columns=["Id"])
+    X = missing_value_treatment(X_raw)
     X = new_feature_engineering(X)
     X = ordinal_mapping(X)
 
     # Predictions machen
     y_pred = model.predict(X)
 
-    # Output-DataFrame erzeugen und speichern
-    OUTPUT_PATH.parent.mkdir(exist_ok=True)
+    # Output-CSV
+    output_path = Path(args.output)
+    output_path.parent.mkdir(exist_ok=True)
+
     out_df = pd.DataFrame(
         {
             "Id": df["Id"],
             "SalePrice": y_pred,
         }
     )
-    out_df.to_csv(OUTPUT_PATH, index=False)
+    out_df.to_csv(output_path, index=False)
 
-    # Predictions zusätzlich in die Datenbank schreiben
-    init_db()  # stellt sicher, dass 'predictions' existiert und 'model_id' hat
+    # Optional: DB Insert
+    if not args.skip_db:
+        init_db()
+        n_inserted = insert_predictions(df["Id"].values, y_pred, model_id=model_id)
+        print(f"{n_inserted} Predictions in die Datenbank geschrieben (model_id={model_id}).")
 
-    champion_id = get_current_champion_id()
-    if champion_id is None:
-        print(
-            "Warnung: Kein Champion-Modell in 'models' gefunden. "
-            "Speichere Predictions ohne model_id."
-        )
-    else:
-        print(f"Verwende Champion model_id={champion_id} für Predictions.")
-
-    n_inserted = insert_predictions(df["Id"].values, y_pred, model_id=champion_id)
-    print(f"{n_inserted} Predictions in die Datenbank geschrieben.")
-    print(f"Predictions gespeichert unter: {OUTPUT_PATH.resolve()}")
+    print(f"Predictions gespeichert unter: {output_path.resolve()}")
+    print(f"Verwendetes Modell: model_id={model_id}, file_path={model_path}")
 
 
 if __name__ == "__main__":

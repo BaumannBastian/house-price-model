@@ -1,0 +1,40 @@
+# ------------------------------
+# docker-compose.yml
+#
+# Lokale Entwicklungs-DB für das House-Price-Projekt.
+# Start:
+#   docker compose up -d
+#
+# Stop:
+#   docker compose down
+#
+# Reset (DB-Daten löschen):
+#   docker compose down -v
+#
+# Hinweis:
+# - Daten bleiben über ein Docker-Volume (pgdata) persistent.
+# - Default-User/Passwort ist bewusst simpel (nur Dev).
+# ------------------------------
+
+# version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    container_name: house-price-postgres
+    environment:
+      POSTGRES_DB: house_prices
+      POSTGRES_USER: house
+      POSTGRES_PASSWORD: house
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U house -d house_prices"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:

@@ -2,61 +2,93 @@
 -- sql/schema.sql
 --
 -- House Price Project - Datenbankschema
--- Tabellen: models, predictions, Indizes, Foreign Key, View
+-- Tabellen:
+--   - models
+--   - predictions
+--   - train_predictions
+--   - train_cv_predictions
+-- View:
+--   - v_predictions_with_model
 -- ------------------------------
 
--- 1. Tabelle 'models' (Modell-Registry)
 CREATE TABLE IF NOT EXISTS models (
-    id           SERIAL PRIMARY KEY,
-    name         TEXT NOT NULL,              -- z.B. 'HistGBR_log'
-    version      TEXT NOT NULL,              -- z.B. '20251204-171745'
-    file_path    TEXT NOT NULL,              -- Pfad zur .joblib-Datei
+    id                  SERIAL PRIMARY KEY,
+    name                TEXT NOT NULL,
+    version             TEXT NOT NULL,
+    file_path           TEXT,
 
-    r2_test      DOUBLE PRECISION,
-    rmse_test    DOUBLE PRECISION,
-    mare_test    DOUBLE PRECISION,
-    cv_rmse_mean DOUBLE PRECISION,
-    cv_rmse_std  DOUBLE PRECISION,
+    r2_test             DOUBLE PRECISION,
+    rmse_test           DOUBLE PRECISION,
+    mare_test           DOUBLE PRECISION,
+    mre_test            DOUBLE PRECISION,
 
-    hyperparams  JSONB,                      -- Hyperparameter als JSON
+    cv_rmse_mean        DOUBLE PRECISION,
+    cv_rmse_std         DOUBLE PRECISION,
 
-    is_champion  BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    max_abs_train_error DOUBLE PRECISION,
+
+    hyperparams         JSONB,
+    is_champion         BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 2. Tabelle 'predictions' (Prediction-Store)
-CREATE TABLE IF NOT EXISTS predictions (
-    id              SERIAL PRIMARY KEY,
-    kaggle_id       INTEGER NOT NULL,        -- Id aus Kaggle-Testdaten
-    predicted_price DOUBLE PRECISION NOT NULL,
-    model_id        INTEGER,                 -- Referenz auf models.id (Champion o.ä.)
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+CREATE INDEX IF NOT EXISTS idx_models_name_version
+    ON models(name, version);
 
--- 3. Foreign Key von predictions.model_id -> models.id
---    (idempotent über DROP CONSTRAINT IF EXISTS)
-ALTER TABLE predictions
-DROP CONSTRAINT IF EXISTS predictions_model_id_fkey;
-
-ALTER TABLE predictions
-ADD CONSTRAINT predictions_model_id_fkey
-FOREIGN KEY (model_id) REFERENCES models(id);
-
--- 4. Indizes für typische Abfragen
-
--- Schnell nach Modell filtern
-CREATE INDEX IF NOT EXISTS idx_predictions_model_id
-    ON predictions(model_id);
-
--- Schnell nach Kaggle-Id suchen
-CREATE INDEX IF NOT EXISTS idx_predictions_kaggle_id
-    ON predictions(kaggle_id);
-
--- Schnell aktuellen Champion finden
 CREATE INDEX IF NOT EXISTS idx_models_is_champion_created_at
     ON models(is_champion, created_at DESC);
 
--- 5. View für komfortables Joinen von Predictions und Modell-Infos
+CREATE TABLE IF NOT EXISTS predictions (
+    id              SERIAL PRIMARY KEY,
+    kaggle_id       INTEGER NOT NULL,
+    predicted_price DOUBLE PRECISION NOT NULL,
+    model_id        INTEGER,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (model_id) REFERENCES models(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_predictions_model_id
+    ON predictions(model_id);
+
+CREATE INDEX IF NOT EXISTS idx_predictions_kaggle_id
+    ON predictions(kaggle_id);
+
+CREATE TABLE IF NOT EXISTS train_predictions (
+    id              SERIAL PRIMARY KEY,
+    kaggle_id       INTEGER NOT NULL,
+    saleprice_true  DOUBLE PRECISION NOT NULL,
+    predicted_price DOUBLE PRECISION NOT NULL,
+    abs_error       DOUBLE PRECISION NOT NULL,
+    rel_error       DOUBLE PRECISION NOT NULL,
+    model_id        INTEGER NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (model_id) REFERENCES models(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_train_predictions_model_id
+    ON train_predictions(model_id);
+
+CREATE INDEX IF NOT EXISTS idx_train_predictions_kaggle_id
+    ON train_predictions(kaggle_id);
+
+CREATE TABLE IF NOT EXISTS train_cv_predictions (
+    id              SERIAL PRIMARY KEY,
+    kaggle_id       INTEGER NOT NULL,
+    saleprice_true  DOUBLE PRECISION NOT NULL,
+    predicted_price DOUBLE PRECISION NOT NULL,
+    abs_error       DOUBLE PRECISION NOT NULL,
+    rel_error       DOUBLE PRECISION NOT NULL,
+    model_id        INTEGER NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (model_id) REFERENCES models(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_train_cv_predictions_model_id
+    ON train_cv_predictions(model_id);
+
+CREATE INDEX IF NOT EXISTS idx_train_cv_predictions_kaggle_id
+    ON train_cv_predictions(kaggle_id);
+
 CREATE OR REPLACE VIEW v_predictions_with_model AS
 SELECT
     p.id,
