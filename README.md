@@ -106,9 +106,6 @@ Der Power BI Report basiert direkt auf den DB-Tabellen:
   - Buckets (z.B. 0–50k, 50–100k, ...): als DAX-Spalte oder Power Query
   - Visual: Avg Abs Error pro Bucket und Modell (Tooltip: Count, Max Error, etc.)
 
-Hinweis:
-- Für Bewerbungen reicht oft: `.pbix` + PDF/Screenshots im Repo unter `reports/` (wenn du es hinzufügen willst).
-
 ---
 
 ## Setup
