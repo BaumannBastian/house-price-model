@@ -27,7 +27,7 @@ Fokus:
 
     .
     ├─ data/
-    │  └─ raw/                      # train.csv / test.csv (nicht committed)
+    │  └─ raw/                      # train.csv / test.csv, nicht im Repo
     ├─ scripts/
     │  ├─ set_env_local_db.ps1
     │  ├─ set_env_azure_db_example.ps1
@@ -113,7 +113,7 @@ Manuell ausführen:
 
 ### Legacy DB (wenn bereits Tabellen existieren)
 
-Falls du eine bestehende DB „übernehmen“ willst, kannst du einmalig baselinen:
+Falls eine bestehende DB übernommen werden soll:
 
     docker compose run --rm --no-deps flyway -connectRetries=60 baseline -baselineVersion=1 -baselineDescription="baseline legacy schema"
     docker compose run --rm --no-deps flyway -connectRetries=60 migrate
@@ -129,7 +129,7 @@ Den aktuellen Stand prüfen:
 Es gibt zwei Wege:
 
 - **Automatisch (empfohlen):** ein Entry-Point (`start_dev.ps1`) setzt die komplette lokale Dev-Umgebung auf.
-- **Manuell:** einzelne Schritte (venv, Docker DB, ENV, Flyway, Tests) – nützlich zum Debuggen oder wenn du nur Teilbereiche brauchst.
+- **Manuell:** einzelne Schritte (venv, Docker DB, ENV, Flyway, Tests) – nützlich zum Debuggen
 
 ---
 
@@ -314,7 +314,7 @@ Hinweis:
 
       docker logs house-price-postgres --tail 100
 
-**DB ist "komisch" / du willst wirklich alles resetten (Achtung: Datenverlust)**
+**DB ist stuck / full reset (Achtung: Datenverlust)**
 - Docker Volume löschen:
 
       docker compose down -v
