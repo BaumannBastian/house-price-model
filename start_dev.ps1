@@ -1,26 +1,28 @@
-# ------------------------------
+# ------------------------------------
 # start_dev.ps1
 #
-# Ziel:
+# Stuktur
+# ------------------------------------
 # Ein einziger Entry-Point, um lokal mit dem Projekt starten zu können.
 #
-# Default: local
+# Default: local (Docker)
 # - startet Postgres via Docker (docker compose)
 # - setzt lokale DB_* ENV-Variablen
 # - aktiviert venv
-# - wendet Schema an (python -m scripts.init_schema)
+# - wendet Migrationen an (Flyway: docker compose run --rm --no-deps flyway migrate)
 # - testet DB-Verbindung
 #
-# Optional: azure (Artifact)
+# Optional: cloud (Azure) --Artifact
 # - (optional) Terraform Firewall Update
 # - setzt Azure DB_* ENV-Variablen (aus lokalem, NICHT getracktem Script)
 #
-# Usage:
+# Usage
+# ------------------------------------
 #   .\start_dev.ps1
 #   .\start_dev.ps1 -Mode local
 #   .\start_dev.ps1 -Mode azure
 #   .\start_dev.ps1 -Mode azure -SkipTerraform
-# ------------------------------
+# ------------------------------------
 
 param(
     [ValidateSet("local", "azure")]
@@ -33,9 +35,6 @@ param(
 # --------------------------------------------------------
 # 0) UTF-8 / Console Robustheit
 # --------------------------------------------------------
-# Wichtig:
-# - Ohne das kann Windows bei Unicode-Ausgaben (z.B. Emojis) Probleme machen.
-# - Zusätzlich setzen wir PYTHONUTF8, damit Python stabil UTF-8 nutzt.
 try {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -46,9 +45,10 @@ $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 Write-Host "Projektroot: $projectRoot" -ForegroundColor Cyan
 Write-Host "Mode: $Mode" -ForegroundColor Cyan
+$composeFile = Join-Path $projectRoot "docker-compose.yml"
 
 # --------------------------------------------------------
-# 1) Python venv aktivieren (falls vorhanden)
+# 1) Python venv aktivieren
 # --------------------------------------------------------
 $venvActivate = Join-Path $projectRoot ".venv\Scripts\Activate.ps1"
 if (Test-Path $venvActivate) {
@@ -59,7 +59,7 @@ if (Test-Path $venvActivate) {
 }
 
 # --------------------------------------------------------
-# 2) DB ENV setzen + DB starten (local) bzw. Terraform (azure)
+# 2) DB ENV setzen + DB starten Docker (local) bzw. Terraform (azure / cloud)
 # --------------------------------------------------------
 if ($Mode -eq "local") {
 
@@ -69,15 +69,13 @@ if ($Mode -eq "local") {
         Write-Host "Docker scheint nicht zu laufen. Bitte Docker Desktop starten." -ForegroundColor Red
         exit 1
     }
-
-    $composeFile = Join-Path $projectRoot "docker-compose.yml"
     if (-not (Test-Path $composeFile)) {
         Write-Host "docker-compose.yml nicht gefunden: $composeFile" -ForegroundColor Red
         exit 1
     }
 
     Write-Host "Starte lokale Postgres-DB via docker compose ..." -ForegroundColor Yellow
-    docker compose -f $composeFile up -d
+    docker compose -f $composeFile up -d db
     if ($LASTEXITCODE -ne 0) {
         Write-Host "docker compose up ist fehlgeschlagen (ExitCode $LASTEXITCODE)." -ForegroundColor Red
         exit $LASTEXITCODE
@@ -139,7 +137,7 @@ if ($Mode -eq "local") {
 }
 
 # --------------------------------------------------------
-# 3) Auf DB warten (gerade bei Docker-Start)
+# 3) Auf DB warten
 # --------------------------------------------------------
 Write-Host "Warte auf DB (max 120s) ..." -ForegroundColor Yellow
 
@@ -148,7 +146,6 @@ $ok = $false
 
 for ($i = 1; $i -le $maxTries; $i++) {
 
-    # Wichtig:
     # - nutzt --quiet, damit keine Ausgabe/Encoding-Probleme den ExitCode verfälschen
     python -m scripts.test_db_connection --quiet *> $null
 
@@ -173,17 +170,55 @@ if (-not $ok) {
 }
 
 # --------------------------------------------------------
-# 4) Schema anwenden (init_schema)
+# 4) Migrationen anwenden (Flyway)
 # --------------------------------------------------------
-Write-Host "Wende DB-Schema an (python -m scripts.init_schema) ..." -ForegroundColor Yellow
-python -m scripts.init_schema
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "init_schema ist fehlgeschlagen (ExitCode $LASTEXITCODE)." -ForegroundColor Red
-    exit $LASTEXITCODE
+Write-Host "Wende DB-Migrationen an (Flyway) ..." -ForegroundColor Yellow
+
+$migrationsDir = Join-Path $projectRoot "sql\migrations"
+if (-not (Test-Path $migrationsDir)) {
+    Write-Host "Migrationen-Verzeichnis nicht gefunden: $migrationsDir" -ForegroundColor Red
+    Write-Host "Erwarte mindestens: sql\migrations\V1__init.sql" -ForegroundColor Yellow
+    exit 1
+}
+
+if ($Mode -eq "local") {
+    docker compose -f $composeFile run --rm --no-deps flyway migrate
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Flyway migrate ist fehlgeschlagen (ExitCode $LASTEXITCODE)." -ForegroundColor Red
+        exit $LASTEXITCODE
+    }
+}
+else {
+    Write-Host "Pruefe Docker (fuer Flyway) ..." -ForegroundColor Yellow
+    docker info *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Docker scheint nicht zu laufen. Bitte Docker Desktop starten." -ForegroundColor Red
+        exit 1
+    }
+    if (-not (Test-Path $composeFile)) {
+        Write-Host "docker-compose.yml nicht gefunden: $composeFile" -ForegroundColor Red
+        exit 1
+    }
+
+    $ssl = $env:DB_SSLMODE
+    if ([string]::IsNullOrWhiteSpace($ssl)) { $ssl = "require" }
+
+    $jdbcUrl = "jdbc:postgresql://$($env:DB_HOST):$($env:DB_PORT)/$($env:DB_NAME)?sslmode=$ssl"
+
+    docker compose -f $composeFile run --rm --no-deps `
+        -e FLYWAY_URL="$jdbcUrl" `
+        -e FLYWAY_USER="$($env:DB_USER)" `
+        -e FLYWAY_PASSWORD="$($env:DB_PASSWORD)" `
+        flyway migrate
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Flyway migrate (Azure) ist fehlgeschlagen (ExitCode $LASTEXITCODE)." -ForegroundColor Red
+        exit $LASTEXITCODE
+    }
 }
 
 # --------------------------------------------------------
-# 5) DB-Verbindung testen (sichtbar)
+# 5) DB-Verbindung testen
 # --------------------------------------------------------
 Write-Host "Teste DB-Verbindung (python -m scripts.test_db_connection) ..." -ForegroundColor Yellow
 python -m scripts.test_db_connection

@@ -1,10 +1,41 @@
-import os
+# ------------------------------------
+# src/db.py
+#
+# In dieser Datei kapseln wir alle Datenbankzugriffe (PostgreSQL via psycopg2).
+#
+# Schema-Management
+# ------------------------------------
+# Das DB-Schema wird NICHT in Python erzeugt.
+# Stattdessen werden Tabellen/Indizes/Views versioniert ueber Flyway-Migrationen 
+# verwaltet (siehe sql/migrations).
+#
+# Connection-Konfiguration
+# ------------------------------------
+# Die Verbindung wird ueber ENV-Variablen konfiguriert:
+#   DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_SSLMODE
+#
+# Diese ENV-Variablen werden vor dem Python-Start gesetzt (automatisch durch start_dev.ps1):
+#   scripts/set_env_local_db.ps1  (lokal, Docker)
+#   scripts/set_env_azure_db.ps1  (cloud, Azure) --Artifact
+#
+# Fehlen ENV-Variablen, greifen Default-Werte (lokale Docker-DB), damit man das Projekt
+# schnell starten kann.
+#
+# Transaktionen & Ressourcen
+# ------------------------------------
+# Jede Funktion oeffnet eine Connection, nutzt `with conn:` (commit/rollback) und schliesst
+# die Connection am Ende zuverlaessig.
+# ------------------------------------
+
+from __future__ import annotations
+
 import json
 import logging
+import os
+import psycopg2
+
 from typing import Iterable, Optional
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +44,7 @@ logger = logging.getLogger(__name__)
 # Connection / ENV
 # --------------------------------------------------------
 
+# Module-level Defaults: os.getenv nur einmal pro Python-Run
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "house_prices")
@@ -24,6 +56,7 @@ DB_SSLMODE = os.getenv("DB_SSLMODE", "require" if ".database.azure.com" in DB_HO
 
 
 def get_connection():
+    """Erzeugt eine psycopg2-Connection basierend auf der ENV-Konfiguration."""
     return psycopg2.connect(
         host=DB_HOST,
         port=DB_PORT,
@@ -35,182 +68,7 @@ def get_connection():
 
 
 # --------------------------------------------------------
-# Schema Init
-# --------------------------------------------------------
-
-def init_predictions_table():
-    create_table_sql = """
-    CREATE TABLE IF NOT EXISTS predictions (
-        id SERIAL PRIMARY KEY,
-        kaggle_id INTEGER NOT NULL,
-        predicted_price DOUBLE PRECISION NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    """
-
-    # Backward compatible: falls table schon ohne model_id existiert
-    alter_add_model_id_sql = """
-    ALTER TABLE predictions
-    ADD COLUMN IF NOT EXISTS model_id INTEGER;
-    """
-
-    idx_model_sql = """
-    CREATE INDEX IF NOT EXISTS idx_predictions_model_id
-    ON predictions (model_id);
-    """
-
-    conn = get_connection()
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(create_table_sql)
-                cur.execute(alter_add_model_id_sql)
-                cur.execute(idx_model_sql)
-    finally:
-        conn.close()
-
-
-def init_train_predictions_table():
-    create_sql = """
-    CREATE TABLE IF NOT EXISTS train_predictions (
-        id SERIAL PRIMARY KEY,
-        kaggle_id INTEGER NOT NULL,
-        saleprice_true DOUBLE PRECISION NOT NULL,
-        predicted_price DOUBLE PRECISION NOT NULL,
-        abs_error DOUBLE PRECISION NOT NULL,
-        rel_error DOUBLE PRECISION NOT NULL,
-        model_id INTEGER NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    """
-
-    idx_model_sql = """
-    CREATE INDEX IF NOT EXISTS idx_train_predictions_model_id
-    ON train_predictions (model_id);
-    """
-
-    conn = get_connection()
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(create_sql)
-                cur.execute(idx_model_sql)
-    finally:
-        conn.close()
-
-
-def init_train_cv_predictions_table():
-    create_sql = """
-    CREATE TABLE IF NOT EXISTS train_cv_predictions (
-        id SERIAL PRIMARY KEY,
-        kaggle_id INTEGER NOT NULL,
-        saleprice_true DOUBLE PRECISION NOT NULL,
-        predicted_price DOUBLE PRECISION NOT NULL,
-        abs_error DOUBLE PRECISION NOT NULL,
-        rel_error DOUBLE PRECISION NOT NULL,
-        model_id INTEGER NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    """
-
-    idx_model_sql = """
-    CREATE INDEX IF NOT EXISTS idx_train_cv_predictions_model_id
-    ON train_cv_predictions (model_id);
-    """
-
-    conn = get_connection()
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(create_sql)
-                cur.execute(idx_model_sql)
-    finally:
-        conn.close()
-
-
-def init_models_table():
-    create_table_sql = """
-    CREATE TABLE IF NOT EXISTS models (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        version TEXT NOT NULL,
-        file_path TEXT,
-
-        r2_test DOUBLE PRECISION,
-        rmse_test DOUBLE PRECISION,
-        mare_test DOUBLE PRECISION,
-        mre_test DOUBLE PRECISION,
-
-        cv_rmse_mean DOUBLE PRECISION,
-        cv_rmse_std DOUBLE PRECISION,
-
-        max_abs_train_error DOUBLE PRECISION,
-
-        hyperparams JSONB,
-        is_champion BOOLEAN NOT NULL DEFAULT FALSE,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    """
-    conn = get_connection()
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(create_table_sql)
-    finally:
-        conn.close()
-
-
-def init_predictions_view():
-    create_view_sql = """
-    CREATE OR REPLACE VIEW v_predictions_with_model AS
-    SELECT
-        p.id AS prediction_id,
-        p.kaggle_id,
-        p.predicted_price,
-        p.model_id,
-        p.created_at AS prediction_created_at,
-
-        m.name AS model_name,
-        m.version AS model_version,
-        m.is_champion AS model_is_champion,
-        m.created_at AS model_created_at
-    FROM predictions p
-    LEFT JOIN models m ON p.model_id = m.id;
-    """
-    conn = get_connection()
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(create_view_sql)
-    finally:
-        conn.close()
-
-
-# --------------------------------------------------------
-# Existing helper (kept)
-# --------------------------------------------------------
-
-def insert_train_predictions(rows: list[tuple]):
-    """
-    Backward compatible helper:
-    rows: [(kaggle_id, y_true, y_pred, abs_error, rel_error, model_id), ...]
-    """
-    sql = """
-    INSERT INTO train_predictions
-        (kaggle_id, saleprice_true, predicted_price, abs_error, rel_error, model_id)
-    VALUES (%s, %s, %s, %s, %s, %s);
-    """
-    conn = get_connection()
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.executemany(sql, rows)
-    finally:
-        conn.close()
-
-
-# --------------------------------------------------------
-# MISSING FUNCTIONS (needed by train.py)  ✅
+# Models (Model-Runs)
 # --------------------------------------------------------
 
 def insert_model(
@@ -228,9 +86,7 @@ def insert_model(
     hyperparams: Optional[dict],
     is_champion: bool = False,
 ) -> int:
-    """
-    Legt einen Eintrag in models an und gibt model_id zurück.
-    """
+    """Legt einen Eintrag in `models` an und gibt die neue model_id zurueck."""
     sql = """
     INSERT INTO models
         (name, version, file_path,
@@ -257,9 +113,15 @@ def insert_model(
                 cur.execute(
                     sql,
                     (
-                        name, version, file_path,
-                        r2_test, rmse_test, mare_test, mre_test,
-                        cv_rmse_mean, cv_rmse_std,
+                        name,
+                        version,
+                        file_path,
+                        r2_test,
+                        rmse_test,
+                        mare_test,
+                        mre_test,
+                        cv_rmse_mean,
+                        cv_rmse_std,
                         max_abs_train_error,
                         hyperparams_json,
                         is_champion,
@@ -270,12 +132,14 @@ def insert_model(
         conn.close()
 
 
-def update_model_file_path(model_id: int, file_path: str):
+def update_model_file_path(model_id: int, file_path: str) -> None:
+    """Setzt/updated den Artifact-Pfad eines Modell-Runs."""
     sql = """
     UPDATE models
     SET file_path = %s
     WHERE id = %s;
     """
+
     conn = get_connection()
     try:
         with conn:
@@ -285,7 +149,8 @@ def update_model_file_path(model_id: int, file_path: str):
         conn.close()
 
 
-def set_champion_model(model_id: int):
+def set_champion_model(model_id: int) -> None:
+    """Setzt genau ein Modell als Champion (models.is_champion)."""
     conn = get_connection()
     try:
         with conn:
@@ -296,6 +161,110 @@ def set_champion_model(model_id: int):
         conn.close()
 
 
+def get_current_champion_id() -> Optional[int]:
+    """Gibt die model_id des aktuellen Champions zurueck (oder None)."""
+    sql = """
+    SELECT id
+    FROM models
+    WHERE is_champion = TRUE
+    ORDER BY created_at DESC
+    LIMIT 1;
+    """
+
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                row = cur.fetchone()
+                return int(row[0]) if row else None
+    finally:
+        conn.close()
+
+
+def get_latest_model_id_by_name(name: str, version: Optional[str] = None) -> Optional[int]:
+    """Gibt die neueste model_id fuer einen Modellnamen zurueck (optional: version fixieren)."""
+    if version is None:
+        sql = """
+        SELECT id
+        FROM models
+        WHERE name = %s
+        ORDER BY created_at DESC
+        LIMIT 1;
+        """
+        params = (name,)
+    else:
+        sql = """
+        SELECT id
+        FROM models
+        WHERE name = %s AND version = %s
+        ORDER BY created_at DESC
+        LIMIT 1;
+        """
+        params = (name, version)
+
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+                return int(row[0]) if row else None
+    finally:
+        conn.close()
+
+
+def get_model_file_path(model_id: int) -> Optional[str]:
+    """Liest file_path fuer eine model_id aus (oder None)."""
+    sql = """
+    SELECT file_path
+    FROM models
+    WHERE id = %s;
+    """
+
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (model_id,))
+                row = cur.fetchone()
+                return str(row[0]) if row and row[0] is not None else None
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------
+# Predictions (Kaggle Test)
+# --------------------------------------------------------
+
+def insert_predictions(
+    kaggle_ids: Iterable[int],
+    y_pred: Iterable[float],
+    *,
+    model_id: Optional[int] = None,
+) -> int:
+    """Schreibt Predictions in die Tabelle `predictions` und gibt die Anzahl Inserts zurueck."""
+    rows = [(int(kid), float(yp), int(model_id) if model_id is not None else None) for kid, yp in zip(kaggle_ids, y_pred)]
+
+    sql = """
+    INSERT INTO predictions (kaggle_id, predicted_price, model_id)
+    VALUES (%s, %s, %s);
+    """
+
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.executemany(sql, rows)
+        return len(rows)
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------
+# Train CV Predictions (OOF fuer PowerBI)
+# --------------------------------------------------------
+
 def insert_train_cv_predictions(
     *,
     kaggle_ids: Iterable[int],
@@ -303,12 +272,7 @@ def insert_train_cv_predictions(
     y_pred_oof: Iterable[float],
     model_id: int,
 ) -> int:
-    """
-    Out-of-fold (CV) Predictions nach train_cv_predictions.
-
-    rel_error = (pred - true)/true (signiert)
-    abs_error separat für Visuals.
-    """
+    """Out-of-fold (CV) Predictions nach `train_cv_predictions`."""
     rows = []
     for kid, yt, yp in zip(kaggle_ids, y_true, y_pred_oof):
         yt_f = float(yt)
@@ -331,18 +295,3 @@ def insert_train_cv_predictions(
         return len(rows)
     finally:
         conn.close()
-
-
-# --------------------------------------------------------
-# DB init wrapper
-# --------------------------------------------------------
-
-def init_db():
-    init_models_table()
-    init_predictions_table()
-    init_train_predictions_table()
-    init_train_cv_predictions_table()
-    try:
-        init_predictions_view()
-    except Exception:
-        logger.warning("Konnte v_predictions_with_model nicht initialisieren (ok).")

@@ -1,22 +1,31 @@
-# ------------------------------
+# ------------------------------------
 # docker-compose.yml
 #
-# Lokale Entwicklungs-DB für das House-Price-Projekt.
-# Start:
-#   docker compose up -d
+# Lokale Entwicklungs-DB + Flyway-Migrationsrunner fuer das House-Price-Projekt.
+#
+# Struktur
+# ------------------------------------
+# - Das DB-Schema wird versioniert ueber Flyway-Migrationen verwaltet.
+# - Python (src/db.py) macht nur noch DB-Zugriffe (Insert/Select/Update).
+#
+# Usage (wird in start_dev.ps1 automatisch genutzt):
+# ------------------------------------
+# 1) DB starten:
+#    docker compose up -d db
+#
+# 2) Migrationen ausfuehren:
+#    docker compose run --rm --no-deps flyway migrate
 #
 # Stop:
-#   docker compose down
+#    docker compose down
 #
-# Reset (DB-Daten löschen):
-#   docker compose down -v
+# Reset (DB-Daten loeschen):
+#    docker compose down -v
 #
 # Hinweis:
-# - Daten bleiben über ein Docker-Volume (pgdata) persistent.
-# - Default-User/Passwort ist bewusst simpel (nur Dev).
-# ------------------------------
-
-# version: "3.9"
+# - Daten bleiben ueber ein Docker-Volume (pgdata) persistent.
+# - Default-User/Passwort ist bewusst simple (nur Dev).
+# ------------------------------------
 
 services:
   db:
@@ -35,6 +44,25 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  flyway:
+    image: flyway/flyway:10
+    container_name: house-price-flyway
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Flyway erwartet Migrationen unter /flyway/sql
+      - ./sql/migrations:/flyway/sql
+    environment:
+      # Default: lokale Docker-DB (im Compose-Netzwerk ist der Hostname 'db')
+      FLYWAY_URL: jdbc:postgresql://db:5432/house_prices
+      FLYWAY_USER: house
+      FLYWAY_PASSWORD: house
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+      # Optional: fail fast bei versehentlichen Aenderungen an alten Migrationen
+      FLYWAY_VALIDATE_ON_MIGRATE: "true"
+    command: ["-connectRetries=60", "migrate"]
 
 volumes:
   pgdata:

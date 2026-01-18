@@ -1,20 +1,19 @@
 # ------------------------------
 # scripts/test_db_connection.py
 #
-# Ziel:
-# Ein kleiner, robuster Healthcheck für die aktuell konfigurierte DB-Verbindung.
+# Struktur
+# ------------------------------
+# Minimaler, robuster Healthcheck fuer die aktuell konfigurierte DB-Verbindung.
 #
-# Basis:
-# - nutzt src.db.get_connection() (Single Source of Truth)
+# Basis
+# ------------------------------
+# - nutzt src.db.get_connection() als Single Source of Truth fuer Connection-Details
 # - ExitCode 0 = OK, ExitCode 1 = Fehler
 #
-# Warum so:
-# - Dieser Check wird von start_dev.ps1 im Loop aufgerufen (auch mit Output-Redirect).
-# - Daher: KEINE Emojis / keine "komischen" Unicode-Chars -> sonst kann Windows cp1252 crashen.
-#
-# Usage:
-#   python -m scripts.test_db_connection
-#   python -m scripts.test_db_connection --quiet
+# Usage
+# ------------------------------
+# python -m scripts.test_db_connection
+# python -m scripts.test_db_connection --quiet
 # ------------------------------
 
 from __future__ import annotations
@@ -26,10 +25,7 @@ from src.db import get_connection
 
 
 def _configure_stdout_utf8() -> None:
-    """
-    Macht stdout auf Windows robuster.
-    (Falls reconfigure nicht existiert, ignorieren wir es.)
-    """
+    """Macht stdout auf Windows robuster (falls reconfigure verfuegbar ist)."""
     try:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     except Exception:
@@ -40,17 +36,12 @@ def main() -> int:
     _configure_stdout_utf8()
 
     parser = argparse.ArgumentParser(description="Testet die DB-Verbindung (ExitCode 0/1).")
-    parser.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Keine Ausgabe, nur ExitCode setzen (für start_dev Wait-Loop).",
-    )
+    parser.add_argument("--quiet", action="store_true", help="Keine Ausgabe, nur ExitCode.")
     args = parser.parse_args()
 
     conn = None
     try:
         conn = get_connection()
-
         with conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT version(), current_database(), current_user;")

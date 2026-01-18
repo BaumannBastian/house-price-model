@@ -1,18 +1,19 @@
-# ------------------------------
+# ------------------------------------
 # predict.py
 #
 # In dieser Python-Datei wird ein Modell geladen (standardmäßig der Champion),
 # auf den Kaggle-House-Prices-Testdatensatz angewendet, die Vorhersagen werden
 # als CSV gespeichert und zusätzlich in die PostgreSQL-Datenbank geschrieben.
 #
-# Auswahl des Modells:
-# - default: aktueller Champion aus der DB (models.is_champion = TRUE)
-# - optional: --model-name oder --model-id
-# ------------------------------
+# Usage
+# ------------------------------------
+# - python predict.py : aktueller Champion aus der DB (models.is_champion = TRUE)
+# - python predict.py --model-name oder --model-id : spezifisches Modell laden
+# - python predict.py --skip-db : keine Predictions in die DB schreiben
+# ------------------------------------
 
 from src.features import missing_value_treatment, new_feature_engineering, ordinal_mapping
 from src.db import (
-    init_db,
     insert_predictions,
     get_current_champion_id,
     get_model_file_path,
@@ -41,88 +42,62 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--model-id", type=int, default=None)
     parser.add_argument("--model-name", type=str, default=None)
-    parser.add_argument("--version", type=str, default=None)
 
-    parser.add_argument("--skip-db", action="store_true", help="Keine DB Inserts durchführen (nur CSV schreiben).")
+    parser.add_argument("--skip-db", action="store_true")
 
     return parser.parse_args()
 
 
-def _resolve_model_id(args: argparse.Namespace) -> int:
+def resolve_model_path(args: argparse.Namespace) -> tuple[int, Path]:
     """
-    Bestimmt, welches Modell verwendet werden soll und gibt model_id zurück.
+    Bestimmt model_id und file_path anhand von CLI-Args.
+    Default: aktueller Champion.
     """
-    if args.model_id is not None and args.model_name is not None:
-        raise ValueError("Bitte entweder --model-id oder --model-name verwenden, nicht beides.")
-
     if args.model_id is not None:
-        return int(args.model_id)
-
-    if args.model_name is not None:
-        model_id = get_latest_model_id_by_name(args.model_name, version=args.version)
+        model_id = int(args.model_id)
+    elif args.model_name is not None:
+        model_id = get_latest_model_id_by_name(args.model_name)
         if model_id is None:
-            raise RuntimeError(f"Kein Modell gefunden für name='{args.model_name}' (version={args.version}).")
-        return int(model_id)
+            raise ValueError(f"Kein Model gefunden mit name={args.model_name}")
+    else:
+        model_id = get_current_champion_id()
+        if model_id is None:
+            raise ValueError("Kein Champion in der DB gesetzt (models.is_champion).")
 
-    champion_id = get_current_champion_id()
-    if champion_id is None:
-        raise RuntimeError("Kein Champion in der DB gefunden. Bitte zuerst `python train.py --mode analysis` ausführen.")
-    return int(champion_id)
+    file_path = get_model_file_path(model_id)
+    if file_path is None:
+        raise ValueError(f"Model file_path ist NULL fuer model_id={model_id}")
+
+    return model_id, Path(file_path)
 
 
 def main() -> None:
-    """
-    Führt Inferenz aus und schreibt CSV + optional DB.
-    """
     args = parse_args()
 
-    model_id = _resolve_model_id(args)
-    file_path = get_model_file_path(model_id)
+    model_id, model_path = resolve_model_path(args)
 
-    if file_path is None:
-        raise FileNotFoundError(
-            f"Kein file_path in models für model_id={model_id}. "
-            "Bitte das Modell zuerst speichern (train-only oder analysis-Champion)."
-        )
+    # Daten laden
+    df = pd.read_csv(args.input)
 
-    model_path = Path(file_path)
-    if not model_path.exists():
-        raise FileNotFoundError(
-            f"Model artifact nicht gefunden unter: {model_path}. "
-            "Pfad aus DB stimmt nicht oder Datei wurde gelöscht."
-        )
-
-    # Modell laden
-    model = joblib.load(model_path)
-
-    # Eingabedaten laden
-    input_path = Path(args.input)
-    df = pd.read_csv(input_path)
-
-    # Gleiche Feature-Pipeline wie im Training
+    # Feature Engineering (muss identisch zu train sein)
     X_raw = df.drop(columns=["Id"])
     X = missing_value_treatment(X_raw)
     X = new_feature_engineering(X)
     X = ordinal_mapping(X)
 
-    # Predictions machen
+    # Modell laden + predict
+    model = joblib.load(model_path)
     y_pred = model.predict(X)
 
-    # Output-CSV
+    # Output schreiben
     output_path = Path(args.output)
-    output_path.parent.mkdir(exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    out_df = pd.DataFrame(
-        {
-            "Id": df["Id"],
-            "SalePrice": y_pred,
-        }
-    )
+    out_df = pd.DataFrame({"Id": df["Id"].values, "SalePrice": y_pred})
     out_df.to_csv(output_path, index=False)
 
     # Optional: DB Insert
     if not args.skip_db:
-        init_db()
         n_inserted = insert_predictions(df["Id"].values, y_pred, model_id=model_id)
         print(f"{n_inserted} Predictions in die Datenbank geschrieben (model_id={model_id}).")
 

@@ -6,36 +6,43 @@
 # temporäre Dateien, virtuelle Umgebungen usw.).
 # ------------------------------
 
-# Python virtual environments
+# ------------------------------
+# Python / venv / Cache
+# ------------------------------
+
 .venv/
 venv/
-
-# __pycache__ folders
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
-# data files
+# ------------------------------
+# Lokale Daten & Artefakte (nicht committen)
+# ------------------------------
+
 data/
-
-# model files
 models/
-
-# notebooks
+predictions/
+logs/
+plots/
 notebooks/
 
-# plots
-plots/
-
-# logs
-logs/
-
-# predicted files
-predictions/
-
+# ------------------------------
 # Lokale Secrets
+# ------------------------------
+
 scripts/set_env_azure_db.ps1
+.env
+.env.*
 
 # ------------------------------
 # Python Build-/Packaging-Artefakte
@@ -45,6 +52,14 @@ house_price_model.egg-info/
 build/
 dist/
 
+# ------------------------------
+# IDE / OS
+# ------------------------------
+
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
 
 # ------------------------------
 # Terraform State & Cache

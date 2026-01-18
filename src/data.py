@@ -1,12 +1,13 @@
-# ------------------------------
+# ------------------------------------
 # src/data.py
 #
 # In dieser Python-Datei werden Hilfsfunktionen bereitgestellt, um
 # den Kaggle-House-Prices-Train-Datensatz (und ggf. weitere CSV-Dateien)
 # als Pandas-DataFrames zu laden.
-# ------------------------------
+# ------------------------------------
 
 import pandas as pd
+
 from pathlib import Path
 
 

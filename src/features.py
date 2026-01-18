@@ -1,260 +1,276 @@
-# ------------------------------
+# ------------------------------------
 # src/features.py
 #
 # In dieser Python-Datei werden Funktionen für Missing-Value-Treatment,
-# Feature-Engineering und ordinales Encoding des House-Prices-Datensatzes
+# Feature-Engineering und ordinal Encoding des House-Prices-Datensatzes
 # bereitgestellt.
-# ------------------------------
+#
+# Wichtiger Hinweis (Leakage vermeiden)
+# ------------------------------------
+# Alles, was statistische Kennzahlen aus den Daten braucht (Median/Modus),
+# wird in einer sklearn-Pipeline pro Fold gefittet. (Siehe src/preprocessing.py)
+# Diese Datei macht deshalb nur:
+# - domain-sinnvolle, konstante Fills (z.B. "None" für "nicht vorhanden")
+# - rein zeilenweises Feature-Engineering (keine globalen Aggregationen)
+# - ordinal Mapping (deterministisch)
+# ------------------------------------
+
+from __future__ import annotations
 
 import pandas as pd
 
 
 # Missing-Value Treatment
 def missing_value_treatment(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Behandelt fehlende Werte im DataFrame nach vordefinierten Strategien.
+    """Behandelt Missing Values ohne Statistik (kein Leakage).
 
-    Es werden verschiedene Spalten-Gruppen mit jeweils eigener
-    Imputationslogik verwendet:
+    Strategie:
     - Bestimmte kategoriale Spalten werden mit dem String ``"None"`` gefüllt,
-      um das Fehlen explizit zu codieren.
-    - Einige numerische Spalten werden mit dem Median aufgefüllt.
-    - Ausgewählte kategoriale Spalten werden mit dem Modus (häufigster Wert)
-      aufgefüllt.
-    - Einzelne numerische Spalten (z.B. Baujahr der Garage) werden mit ``0``
-      belegt.
+      um "nicht vorhanden" explizit zu codieren (z.B. kein Pool, keine Garage).
+    - Ausgewählte numerische Spalten, bei denen 0 semantisch "nicht vorhanden"
+      bedeutet, werden mit ``0`` gefüllt (z.B. GarageYrBlt falls keine Garage).
 
-    Die Funktion arbeitet auf einer Kopie des übergebenen DataFrames, so
-    dass das Original nicht verändert wird.
+    Alles andere (Median/Modus) macht anschließend der Preprocessor in
+    ``src/preprocessing.py`` via ``SimpleImputer``.
 
     Parameter
     ----------
     df : pandas.DataFrame
-        Roh-DataFrame des House-Prices-Datensatzes mit möglichen
-        fehlenden Werten in den relevanten Spalten.
+        Roh-DataFrame mit möglichen fehlenden Werten.
 
     Returns
     -------
     pandas.DataFrame
-        Kopie von ``df`` mit imputierten fehlenden Werten in den Spalten
-        ``none_fill``, ``median_fill``, ``modus_fill`` und ``zero_fill``.
+        Kopie von ``df`` mit konstant imputierten Spalten.
     """
     df = df.copy()
 
-    # Defining columns for different imputation strategies
     none_fill = [
-        "PoolQC", "MiscFeature", "Alley", "Fence", "FireplaceQu",
-        "GarageQual", "GarageFinish", "GarageType", "GarageCond",
-        "BsmtExposure", "BsmtCond", "BsmtQual", "BsmtFinType2", "BsmtFinType1",
-    ]
-    median_fill = [
-        "LotFrontage", "MasVnrArea",
-    ]
-    modus_fill = [
-        "MasVnrType", "Electrical",
+        "PoolQC",
+        "MiscFeature",
+        "Alley",
+        "Fence",
+        "FireplaceQu",
+        "GarageQual",
+        "GarageFinish",
+        "GarageType",
+        "GarageCond",
+        "BsmtExposure",
+        "BsmtCond",
+        "BsmtQual",
+        "BsmtFinType2",
+        "BsmtFinType1",
     ]
     zero_fill = [
         "GarageYrBlt",
     ]
 
-    # Imputation application
     for col in none_fill:
-        df[col] = df[col].fillna("None")
-
-    for col in median_fill:
-        df[col] = df[col].fillna(df[col].median())
-
-    for col in modus_fill:
-        df[col] = df[col].fillna(df[col].mode()[0])
+        if col in df.columns:
+            df[col] = df[col].fillna("None")
 
     for col in zero_fill:
-        df[col] = df[col].fillna(0)
+        if col in df.columns:
+            df[col] = df[col].fillna(0)
 
     return df
 
 
 # Feature Engineering
 def new_feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Erstellt neue, zusammengesetzte Features im DataFrame.
+    """Erstellt neue, zusammengesetzte Features im DataFrame (rein zeilenweise).
 
-    Die Funktion fügt u.a. folgende Features hinzu:
-    - ``HouseAge``  : Alter des Hauses zum Verkaufszeitpunkt
-                      (``YrSold - YearBuilt``).
-    - ``RemodAge``  : Alter seit der letzten Renovierung zum Verkaufszeitpunkt
-                      (``YrSold - YearRemodAdd``).
-    - ``TotalSF``   : Gesamtwohnfläche aus Keller, 1. und 2. Etage
-                      (``TotalBsmtSF + 1stFlrSF + 2ndFlrSF``).
-    - ``TotalBath`` : Gesamtzahl der Bäder inkl. Halb-Bäder
-                      (vollwertige Bäder + 0.5 * Halb-Bäder im Keller und
-                      im Wohnbereich).
-    - ``TotalPorchSF`` : Gesamtfläche aller Veranden und Decks
-                         (Offene, geschlossene, 3-Saison-, Screen-Porch
-                         und ``WoodDeckSF``).
+    Features (Auszug):
+    - ``HouseAge``      : Alter des Hauses beim Verkauf (YrSold - YearBuilt)
+    - ``RemodAge``      : Alter seit Renovierung (YrSold - YearRemodAdd)
+    - ``IsRemodeled``   : 1 falls renoviert, sonst 0
+    - ``TotalSF``       : TotalBsmtSF + 1stFlrSF + 2ndFlrSF
+    - ``TotalBath``     : FullBath + 0.5*HalfBath + BsmtFullBath + 0.5*BsmtHalfBath
+    - ``TotalPorchSF``  : OpenPorchSF + EnclosedPorch + 3SsnPorch + ScreenPorch + WoodDeckSF
+    - ``HasBasement``   : 1 falls TotalBsmtSF > 0
+    - ``HasGarage``     : 1 falls GarageArea > 0
+    - ``HasFireplace``  : 1 falls Fireplaces > 0
+    - ``HasPool``       : 1 falls PoolArea > 0
+    - ``QualSF``        : OverallQual * GrLivArea
 
-    Die neue Spalten werden in-place in ``df`` angelegt und derselbe
-    DataFrame wird zurückgegeben.
+    Hinweis: Für Summen/Produkte nutzen wir ``fillna(0)``, damit fehlende
+    Komponenten nicht zu NaNs in den neuen Features führen. Die finale
+    (statistische) Imputation passiert dennoch im Preprocessor.
 
     Parameter
     ----------
     df : pandas.DataFrame
-        DataFrame mit den Original-Spalten des House-Prices-Datensatzes
-        (u.a. ``YrSold``, ``YearBuilt``, ``YearRemodAdd``, ``TotalBsmtSF``,
-        ``1stFlrSF``, ``2ndFlrSF``, Bad- und Porch-Spalten).
+        DataFrame mit den Original-Spalten des House-Prices-Datensatzes.
 
     Returns
     -------
     pandas.DataFrame
-        Derselbe DataFrame-Objekt-Referenz wie ``df``, erweitert um die neuen
-        Spalten ``HouseAge``, ``RemodAge``, ``TotalSF``, ``TotalBath`` und
-        ``TotalPorchSF``.
+        Derselbe DataFrame (in-place erweitert).
     """
-    df["HouseAge"] = df["YrSold"] - df["YearBuilt"]
+    # Altersfeatures
+    if "YrSold" in df.columns and "YearBuilt" in df.columns:
+        df["HouseAge"] = df["YrSold"] - df["YearBuilt"]
+    if "YrSold" in df.columns and "YearRemodAdd" in df.columns:
+        df["RemodAge"] = df["YrSold"] - df["YearRemodAdd"]
+    if "YearRemodAdd" in df.columns and "YearBuilt" in df.columns:
+        df["IsRemodeled"] = (df["YearRemodAdd"] != df["YearBuilt"]).astype(int)
 
-    df["RemodAge"] = df["YrSold"] - df["YearRemodAdd"]
+    # TotalSF
+    required_sf = ["TotalBsmtSF", "1stFlrSF", "2ndFlrSF"]
+    for col in required_sf:
+        if col not in df.columns:
+            raise KeyError(f"Spalte fehlt für Feature-Engineering: {col}")
+    df["TotalSF"] = (
+        df["TotalBsmtSF"].fillna(0)
+        + df["1stFlrSF"].fillna(0)
+        + df["2ndFlrSF"].fillna(0)
+    )
 
-    df["TotalSF"] = df["TotalBsmtSF"] + df["1stFlrSF"] + df["2ndFlrSF"]
-
+    # TotalBath
+    required_bath = ["FullBath", "HalfBath", "BsmtFullBath", "BsmtHalfBath"]
+    for col in required_bath:
+        if col not in df.columns:
+            raise KeyError(f"Spalte fehlt für Feature-Engineering: {col}")
     df["TotalBath"] = (
-        df["FullBath"]
-        + 0.5 * df["HalfBath"]
-        + df["BsmtFullBath"]
-        + 0.5 * df["BsmtHalfBath"]
+        df["FullBath"].fillna(0)
+        + 0.5 * df["HalfBath"].fillna(0)
+        + df["BsmtFullBath"].fillna(0)
+        + 0.5 * df["BsmtHalfBath"].fillna(0)
     )
 
-    df["TotalPorchSF"] = (
-        df["OpenPorchSF"]
-        + df["EnclosedPorch"]
-        + df["3SsnPorch"]
-        + df["ScreenPorch"]
-        + df["WoodDeckSF"]
-    )
+    # TotalPorchSF
+    porch_cols = ["OpenPorchSF", "EnclosedPorch", "3SsnPorch", "ScreenPorch", "WoodDeckSF"]
+    for col in porch_cols:
+        if col not in df.columns:
+            raise KeyError(f"Spalte fehlt für Feature-Engineering: {col}")
+    df["TotalPorchSF"] = sum(df[c].fillna(0) for c in porch_cols)
+
+    # Binäre Has_* Features
+    if "TotalBsmtSF" in df.columns:
+        df["HasBasement"] = (df["TotalBsmtSF"].fillna(0) > 0).astype(int)
+    if "GarageArea" in df.columns:
+        df["HasGarage"] = (df["GarageArea"].fillna(0) > 0).astype(int)
+    if "Fireplaces" in df.columns:
+        df["HasFireplace"] = (df["Fireplaces"].fillna(0) > 0).astype(int)
+    if "PoolArea" in df.columns:
+        df["HasPool"] = (df["PoolArea"].fillna(0) > 0).astype(int)
+
+    # Interaktion Qualität x Fläche
+    if "OverallQual" in df.columns and "GrLivArea" in df.columns:
+        df["QualSF"] = df["OverallQual"].fillna(0) * df["GrLivArea"].fillna(0)
 
     return df
 
 
 # Ordinal Encoding
 def ordinal_mapping(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Kodiert ordinale kategoriale Merkmale in geordnete numerische Werte.
+    """Kodiert ordinale kategoriale Merkmale in geordnete numerische Werte.
 
-    Es werden mehrere Mapping-Dictionaries definiert, um typische
-    Qualitäts- und Funktionsstufen (z.B. ``Ex``, ``Gd``, ``TA``, …) in
-    ganze Zahlen zu übersetzen. Dies betrifft u.a. Spalten wie
-    ``ExterQual``, ``BsmtQual``, ``FireplaceQu``, ``GarageFinish``,
-    ``BsmtFinType1/2``, ``Functional`` und ``PavedDrive``.
+    Mapping-Dictionaries übersetzen typische Qualitäts- und Funktionsstufen
+    (z.B. ``Ex``, ``Gd``, ``TA``) in ganze Zahlen.
 
-    Beispiel:
-    - Höhere Qualität (z.B. ``Ex``) erhält größere Zahlen als niedrige
-      Qualität (z.B. ``Po``).
-    - Kein Vorhandensein wird in der Regel mit ``0`` kodiert (z.B. ``None``).
-
-    Die Kodierung erfolgt in-place auf dem übergebenen DataFrame.
+    Wichtig:
+    - Vorher sollte ``missing_value_treatment`` gelaufen sein, damit echte
+      "nicht vorhanden"-Fälle als ``"None"`` vorliegen.
+    - Echte NaNs können trotzdem vorkommen; die verbleibende Imputation
+      macht danach der Preprocessor (SimpleImputer).
 
     Parameter
     ----------
     df : pandas.DataFrame
-        DataFrame nach Missing-Value-Treatment, in dem die relevanten
-        Spalten bereits existieren und ggf. ``"None"``-Strings enthalten.
+        DataFrame nach (konstantem) Missing-Value-Treatment.
 
     Returns
     -------
     pandas.DataFrame
-        Derselbe DataFrame-Objekt-Referenz wie ``df``, bei dem die
-        betroffenen ordinale Spalten durch numerische Codes ersetzt wurden.
+        Derselbe DataFrame, ordinale Spalten sind numerisch kodiert.
     """
-    # Mapping Dictionaries
     quality_mapping_ExGdTAFaPoNone = {
-        # ExterQual, ExterCond, BsmtQual, BsmtCond, HeatingQC,
-        # KitchenQual, FireplaceQu, GarageQual, GarageCond, PoolQC
-        "Ex": 5,        # Excellent
-        "Gd": 4,        # Good
-        "TA": 3,        # Typical/Average
-        "Fa": 2,        # Fair
-        "Po": 1,        # Poor
-        "None": 0,      # None
+        "Ex": 5,  # Excellent
+        "Gd": 4,  # Good
+        "TA": 3,  # Typical/Average
+        "Fa": 2,  # Fair
+        "Po": 1,  # Poor
+        "None": 0,  # None
     }
     quality_mapping_GdAvMnNoNone = {
-        # BsmtExposure
-        "Gd": 4,        # Good Exposure
-        "Av": 3,        # Average Exposure
-        "Mn": 2,        # Minimum Exposure
-        "No": 1,        # No Exposure
-        "None": 0,      # None
+        "Gd": 4,  # Good Exposure
+        "Av": 3,  # Average Exposure
+        "Mn": 2,  # Minimum Exposure
+        "No": 1,  # No Exposure
+        "None": 0,  # None
     }
     quality_mapping_GLQALQBLQRecLwQUnfNone = {
-        # BsmtFinType1, BsmtFinType2
-        "GLQ": 6,       # Good Living Quarters
-        "ALQ": 5,       # Average Living Quarters
-        "BLQ": 4,       # Below Average Living Quarters
-        "Rec": 3,       # Average Rec Room
-        "LwQ": 2,       # Low Quality
-        "Unf": 1,       # Unfinished
-        "None": 0,      # None
+        "GLQ": 6,  # Good Living Quarters
+        "ALQ": 5,  # Average Living Quarters
+        "BLQ": 4,  # Below Average Living Quarters
+        "Rec": 3,  # Average Rec Room
+        "LwQ": 2,  # Low Quality
+        "Unf": 1,  # Unfinished
+        "None": 0,  # None
     }
     quality_mapping_TypMin1Min2ModMaj1Maj2SevSal = {
-        # Functional
-        "Typ": 7,       # Typical Functionality
-        "Min1": 6,      # Minor Deductions 1
-        "Min2": 5,      # Minor Deductions 2
-        "Mod": 4,       # Moderate Deductions
-        "Maj1": 3,      # Major Deductions 1
-        "Maj2": 2,      # Major Deductions 2
-        "Sev": 1,       # Severely Damaged
-        "Sal": 0,       # Salvage Only
+        "Typ": 7,  # Typical Functionality
+        "Min1": 6,  # Minor Deductions 1
+        "Min2": 5,  # Minor Deductions 2
+        "Mod": 4,  # Moderate Deductions
+        "Maj1": 3,  # Major Deductions 1
+        "Maj2": 2,  # Major Deductions 2
+        "Sev": 1,  # Severely Damaged
+        "Sal": 0,  # Salvage Only
     }
     quality_mapping_FinRFnUnfNone = {
-        # GarageFinish
-        "Fin": 3,       # Finished
-        "RFn": 2,       # Rough Finished
-        "Unf": 1,       # Unfinished
-        "None": 0,      # None
+        "Fin": 3,  # Finished
+        "RFn": 2,  # Rough Finished
+        "Unf": 1,  # Unfinished
+        "None": 0,  # None
     }
     quality_mapping_YPN = {
-        # PavedDrive
-        "Y": 2,         # Paved
-        "P": 1,         # Partially Paved
-        "N": 0,         # Dirt/Gravel
+        "Y": 2,  # Paved
+        "P": 1,  # Partially Paved
+        "N": 0,  # Dirt/Gravel
     }
 
-    # Mapping Columns to Apply
     cols_ExGdTAFaPoNone = [
-        "ExterQual", "ExterCond", "BsmtQual", "BsmtCond", "HeatingQC",
-        "KitchenQual", "FireplaceQu", "GarageQual", "GarageCond", "PoolQC",
+        "ExterQual",
+        "ExterCond",
+        "BsmtQual",
+        "BsmtCond",
+        "HeatingQC",
+        "KitchenQual",
+        "FireplaceQu",
+        "GarageQual",
+        "GarageCond",
+        "PoolQC",
     ]
-    cols_GdAvMnNoNone = [
-        "BsmtExposure",
-    ]
-    cols_GLQALQBLQRecLwQUnfNone = [
-        "BsmtFinType1", "BsmtFinType2",
-    ]
-    cols_TypMin1Min2ModMaj1Maj2SevSal = [
-        "Functional",
-    ]
-    cols_FinRFnUnfNone = [
-        "GarageFinish",
-    ]
-    cols_YPN = [
-        "PavedDrive",
-    ]
+    cols_GdAvMnNoNone = ["BsmtExposure"]
+    cols_GLQALQBLQRecLwQUnfNone = ["BsmtFinType1", "BsmtFinType2"]
+    cols_TypMin1Min2ModMaj1Maj2SevSal = ["Functional"]
+    cols_FinRFnUnfNone = ["GarageFinish"]
+    cols_YPN = ["PavedDrive"]
 
-    # Mapping application
     for col in cols_ExGdTAFaPoNone:
-        df[col] = df[col].map(quality_mapping_ExGdTAFaPoNone)
+        if col in df.columns:
+            df[col] = df[col].map(quality_mapping_ExGdTAFaPoNone)
 
     for col in cols_GdAvMnNoNone:
-        df[col] = df[col].map(quality_mapping_GdAvMnNoNone)
+        if col in df.columns:
+            df[col] = df[col].map(quality_mapping_GdAvMnNoNone)
 
     for col in cols_GLQALQBLQRecLwQUnfNone:
-        df[col] = df[col].map(quality_mapping_GLQALQBLQRecLwQUnfNone)
+        if col in df.columns:
+            df[col] = df[col].map(quality_mapping_GLQALQBLQRecLwQUnfNone)
 
     for col in cols_TypMin1Min2ModMaj1Maj2SevSal:
-        df[col] = df[col].map(quality_mapping_TypMin1Min2ModMaj1Maj2SevSal)
+        if col in df.columns:
+            df[col] = df[col].map(quality_mapping_TypMin1Min2ModMaj1Maj2SevSal)
 
     for col in cols_FinRFnUnfNone:
-        df[col] = df[col].map(quality_mapping_FinRFnUnfNone)
+        if col in df.columns:
+            df[col] = df[col].map(quality_mapping_FinRFnUnfNone)
 
     for col in cols_YPN:
-        df[col] = df[col].map(quality_mapping_YPN)
+        if col in df.columns:
+            df[col] = df[col].map(quality_mapping_YPN)
 
     return df

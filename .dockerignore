@@ -9,21 +9,30 @@
 .venv/
 venv/
 
-# Python-Bytecode & Cache-Verzeichnisse
+# Python Bytecode / Cache
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-# Git-Metadaten
+# Git metadata
 .git/
 .gitignore
 
-# Daten & Modelle (lokale Dateien / Artefakte)
+# Local data & artifacts
 data/
 models/
-
-# Logs & Plots
+predictions/
 logs/
 plots/
-
-# Notebooks
 notebooks/
 *.ipynb
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Terraform (nicht notwendig im Runtime-Image)
+terraform/

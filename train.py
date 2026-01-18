@@ -1,231 +1,217 @@
-# ------------------------------
+# ------------------------------------
 # train.py
 #
-# In dieser Python-Datei werden die Trainingsdaten geladen, Features
-# erzeugt und Modelle trainiert.
+# Dieses Skript trainiert mehrere Modelle für das Kaggle House Prices Projekt
+# und speichert die Modelle als .joblib Artefakte.
 #
-# Modi
-# ----
-# 1) train-only:
-#    - jedes Modell wird einmal auf dem kompletten train.csv trainiert
-#    - jedes Modell wird als .joblib gespeichert
-#    - pro Modell wird eine Zeile in 'models' geschrieben (file_path gesetzt)
+# Struktur
+# ------------------------------------
+# - train-only
+#   Trainiert alle Modelle auf den gesamten Trainingsdaten (Full-Data),
+#   speichert Artefakte und schreibt einen Model-Run in die DB.
 #
-# 2) analysis:
-#    - gemeinsamer Train/Test Split (Holdout) für Test-Metriken
-#    - gemeinsamer KFold Split (gleiche Folds für alle Modelle)
-#    - pro Modell: OOF/CV Predictions werden in 'train_cv_predictions' gespeichert
-#    - Champion wird per cv_rmse_mean bestimmt
-#    - Champion wird auf Full-Data neu gefittet und gespeichert (file_path)
-# ------------------------------
+# - analysis
+#   Führt eine KFold-CV (gemeinsame Splits für alle Modelle) auf dem Trainingsset durch,
+#   schreibt OOF-Predictions in train_cv_predictions (für PowerBI),
+#   loggt CV-Metriken in models und setzt den Champion nach CV-RMSE.
+#
+# Usage
+# ------------------------------------
+# - python train.py startet "train-only" Mode
+# - python train.py --mode analysis startet "analysis" Mode
+# - DB-Schema wird via Flyway gemanaged (siehe start_dev.ps1 / docker-compose.yml)
+# ------------------------------------
+
+from __future__ import annotations
+
+import argparse
+import logging
+import warnings
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Tuple
+
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.compose import TransformedTargetRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import KFold, train_test_split
+from sklearn.pipeline import Pipeline
 
 from src.data import load_train_data
-from src.features import (
-    missing_value_treatment,
-    new_feature_engineering,
-    ordinal_mapping,
-)
-from src.preprocessing import build_preprocessor
+from src.features import missing_value_treatment, new_feature_engineering, ordinal_mapping
 from src.models import (
     build_linear_regression_model,
     build_random_forest_model,
     build_histogram_based_model,
 )
 from src.nn_models import build_torch_mlp_model
+from src.preprocessing import build_preprocessor
+
 from src.db import (
-    init_db,
-    init_predictions_view,
-    init_models_table,
-    init_train_cv_predictions_table,
     insert_model,
     insert_train_cv_predictions,
     set_champion_model,
     update_model_file_path,
 )
 
-import argparse
-import logging
-import warnings
-import joblib
-import numpy as np
 
-from datetime import datetime
-from pathlib import Path
-from sklearn.model_selection import KFold, train_test_split
-from sklearn.metrics import mean_squared_error, r2_score
+# --------------------------------------------------------
+# Logging
+# --------------------------------------------------------
 
 
-# Optional: nur falls du es im Projekt hast (typischerweise in src/data.py)
-try:
-    from src.data import load_test_data  # type: ignore
-except Exception:
-    load_test_data = None
+def setup_logging(debug: bool) -> logging.Logger:
+    logger = logging.getLogger("train")
+    logger.setLevel(logging.DEBUG if debug else logging.INFO)
+
+    # Handler nur einmal hinzufügen
+    if not logger.handlers:
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.DEBUG if debug else logging.INFO)
+        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        ch.setFormatter(fmt)
+        logger.addHandler(ch)
+
+    return logger
+
+
+# --------------------------------------------------------
+# CLI
+# --------------------------------------------------------
 
 
 def parse_args() -> argparse.Namespace:
-    """
-    Parst Kommandozeilenargumente für das Trainingsskript.
-    """
     parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--mode",
-        choices=["analysis", "train-only"],
-        default="train-only",
-        help="analysis = CV + OOF speichern, train-only = nur Full-Train + Modelle speichern",
-    )
+    parser.add_argument("--mode", choices=["train-only", "analysis"], default="train-only")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cv-splits", type=int, default=5)
-
-    parser.add_argument(
-        "--nn-verbose",
-        action="store_true",
-        help="TorchMLP während des Trainings Loss ausgeben",
-    )
-    parser.add_argument(
-        "--nn-plot-loss",
-        action="store_true",
-        help="TorchMLP Losskurve nach Training als PNG speichern (nur Full-Fit)",
-    )
-
     return parser.parse_args()
 
 
-def setup_logging(debug: bool = False) -> logging.Logger:
-    """
-    Richtet das Logging für das Trainingsskript ein.
+# --------------------------------------------------------
+# Metrics
+# --------------------------------------------------------
 
-    Wichtig:
-    - force=True verhindert doppelte Handler / doppelte Ausgabe.
-    """
-    level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        force=True,
+
+def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
+
+def mare(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    denom = np.maximum(np.abs(y_true), 1e-9)
+    return float(np.mean(np.abs(y_pred - y_true) / denom))
+
+
+def mre(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    denom = np.maximum(np.abs(y_true), 1e-9)
+    return float(np.mean((y_pred - y_true) / denom))
+
+
+# --------------------------------------------------------
+# CV + Eval
+# --------------------------------------------------------
+
+
+def eval_on_holdout(
+    model: Pipeline,
+    X_test: pd.DataFrame,
+    y_test: np.ndarray,
+) -> Tuple[float, float, float, float]:
+    y_pred = model.predict(X_test)
+    return (
+        float(r2_score(y_test, y_pred)),
+        rmse(y_test, y_pred),
+        float(mean_absolute_error(y_test, y_pred)),
+        mare(y_test, y_pred),
     )
-    return logging.getLogger("train")
 
 
-def _extract_hyperparams(model) -> dict:
+def _extract_hyperparams(model: Pipeline) -> Optional[dict]:
     """
-    Extrahiert Hyperparameter des inneren Regressors (Pipeline-Step "regressor").
-    """
-    try:
-        base = model.regressor
-        inner_reg = base.named_steps["regressor"]
-        return inner_reg.get_params(deep=False)
-    except Exception:
-        return {}
-
-
-def _maybe_set_n_jobs_max(model) -> None:
-    """
-    Setzt n_jobs=-1 für Modelle, die das unterstützen (beschleunigt CV auf lokalen Maschinen).
+    Versucht, Config/Parameter aus dem letzten Step herauszuziehen.
+    (Best effort, weil scikit-learn Pipelines + TargetTransformer etc.)
     """
     try:
-        inner = model.regressor.named_steps["regressor"]
-        params = inner.get_params(deep=False)
-        if "n_jobs" in params:
-            inner.set_params(n_jobs=-1)
+        if isinstance(model, TransformedTargetRegressor):
+            base = model.regressor_
+        else:
+            base = model
+
+        if hasattr(base, "named_steps"):
+            est = base.named_steps.get("model", None)
+        else:
+            est = base
+
+        if est is None:
+            return None
+
+        # TorchMLP / sklearn Modelle haben meist get_params
+        if hasattr(est, "get_params"):
+            params = est.get_params(deep=False)
+            # Nicht zu groß machen: nur simple types
+            simple = {}
+            for k, v in params.items():
+                if isinstance(v, (int, float, str, bool, type(None))):
+                    simple[k] = v
+            return simple
+
+        return None
     except Exception:
-        pass
+        return None
 
 
-def _oof_predictions_from_splits(
-    logger: logging.Logger,
-    model_name: str,
-    builder,
-    preprocessor,
-    use_log_target: bool,
-    X_train,
-    Y_train,
-    splits,
-    nn_verbose: bool = False,
-) -> tuple[np.ndarray, float, float]:
-    """
-    Berechnet Out-of-Fold (OOF) Predictions auf Basis vorgegebener CV-Splits.
-
-    Wichtig:
-    - splits werden außerhalb einmal erstellt und für alle Modelle wiederverwendet,
-      damit jedes Modell exakt die gleichen Folds sieht.
-    """
-    oof_pred = np.empty(len(X_train), dtype=float)
-    oof_pred[:] = np.nan
-
-    fold_rmses = []
-    n_folds = len(splits)
-
-    for fold_idx, (tr_idx, val_idx) in enumerate(splits, start=1):
-        logger.info("[%s] CV fold %d/%d: fit", model_name, fold_idx, n_folds)
-
-        model_fold = builder(preprocessor, use_log_target=use_log_target)
-        _maybe_set_n_jobs_max(model_fold)
-
-        if nn_verbose:
-            try:
-                inner_mlp = model_fold.regressor.named_steps["regressor"]
-                inner_mlp.verbose = True
-            except Exception:
-                pass
-
-        model_fold.fit(X_train.iloc[tr_idx], Y_train[tr_idx])
-        pred_val = model_fold.predict(X_train.iloc[val_idx])
-
-        oof_pred[val_idx] = pred_val
-
-        rmse_fold = float(np.sqrt(mean_squared_error(Y_train[val_idx], pred_val)))
-        fold_rmses.append(rmse_fold)
-
-        logger.info("[%s] CV fold %d/%d: RMSE = %.2f", model_name, fold_idx, n_folds, rmse_fold)
-
-    if np.isnan(oof_pred).any():
-        raise RuntimeError("OOF-Predictions enthalten NaNs – CV Splits haben nicht alle Indizes befüllt.")
-
-    return oof_pred, float(np.mean(fold_rmses)), float(np.std(fold_rmses))
+# --------------------------------------------------------
+# Main
+# --------------------------------------------------------
 
 
 def main() -> None:
-    """
-    Führt train.py im gewählten Modus aus.
-    """
+    """Führt train.py im gewählten Modus aus."""
     warnings.filterwarnings("ignore", category=UserWarning)
 
     args = parse_args()
     logger = setup_logging(args.debug)
 
-    # DB Grundsetup (idempotent)
-    init_models_table()
-    init_db()
-    try:
-        init_predictions_view()
-    except Exception:
-        logger.warning("Konnte v_predictions_with_model nicht initialisieren (ok).")
-
     run_version = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     # Rohdaten laden
     df = load_train_data()
-
     kaggle_ids = df["Id"].to_numpy()
     Y = df["SalePrice"].to_numpy()
 
     X_raw = df.drop(columns=["Id", "SalePrice"])
 
+    # deterministische, zeilenweise Schritte (kein Leakage)
     X = missing_value_treatment(X_raw)
     X = new_feature_engineering(X)
     X = ordinal_mapping(X)
 
+    # Preprocessor-Builder (modell-spezifisch)
+    def prep_ohe(df_like):
+        return build_preprocessor(df_like, kind="ohe_dense", min_frequency=10, scale_numeric=False)
+
+    def prep_nn(df_like):
+        return build_preprocessor(df_like, kind="ohe_dense", min_frequency=10, scale_numeric=True)
+
+    def prep_hgb(df_like):
+        return build_preprocessor(df_like, kind="hgb_native")
+
     configs = [
-        ("LinearRegression", build_linear_regression_model, False),
-        ("LinearRegression_log", build_linear_regression_model, True),
-        ("RandomForest", build_random_forest_model, False),
-        ("RandomForest_log", build_random_forest_model, True),
-        ("HistGBR", build_histogram_based_model, False),
-        ("HistGBR_log", build_histogram_based_model, True),
-        ("TorchMLP", build_torch_mlp_model, False),
-        ("TorchMLP_log", build_torch_mlp_model, True),
+        ("LinearRegression", build_linear_regression_model, False, prep_ohe),
+        ("LinearRegression_log", build_linear_regression_model, True, prep_ohe),
+        ("RandomForest", build_random_forest_model, False, prep_ohe),
+        ("RandomForest_log", build_random_forest_model, True, prep_ohe),
+        ("HistGBR", build_histogram_based_model, False, prep_hgb),
+        ("HistGBR_log", build_histogram_based_model, True, prep_hgb),
+        ("TorchMLP", build_torch_mlp_model, False, prep_nn),
+        ("TorchMLP_log", build_torch_mlp_model, True, prep_nn),
     ]
 
     # ---------------------------------------------------------------------
@@ -233,24 +219,16 @@ def main() -> None:
     # ---------------------------------------------------------------------
     if args.mode == "train-only":
         logger.info("Mode: train-only")
-        logger.info("Baue Preprocessor auf Full-Data.")
-        preprocessor_full = build_preprocessor(X)
 
         models_dir = Path("models")
         models_dir.mkdir(exist_ok=True)
 
-        for name, builder, use_log in configs:
+        for name, builder, use_log, prep_builder in configs:
             logger.info("=== Train-only: %s (use_log_target=%s) ===", name, use_log)
 
-            model = builder(preprocessor_full, use_log_target=use_log)
-            _maybe_set_n_jobs_max(model)
+            preprocessor = prep_builder(X)
 
-            if args.nn_verbose and name.startswith("TorchMLP"):
-                try:
-                    inner_mlp = model.regressor.named_steps["regressor"]
-                    inner_mlp.verbose = True
-                except Exception:
-                    pass
+            model = builder(preprocessor, use_log_target=use_log)
 
             model.fit(X, Y)
 
@@ -271,7 +249,7 @@ def main() -> None:
                 cv_rmse_std=None,
                 max_abs_train_error=None,
                 hyperparams=hyperparams,
-                is_champion=False,  # train-only setzt keinen Champion um
+                is_champion=False,
             )
 
             logger.info("Gespeichert: %s (model_id=%s) -> %s", name, model_id, out_path)
@@ -283,7 +261,7 @@ def main() -> None:
     # MODE: analysis
     # ---------------------------------------------------------------------
     logger.info("Mode: analysis")
-    init_train_cv_predictions_table()
+    # Erwartet: DB-Schema ist bereits via Flyway vorhanden
 
     (
         X_train,
@@ -300,10 +278,11 @@ def main() -> None:
         random_state=args.seed,
     )
 
-    logger.info("Baue Preprocessor auf X_train.")
-    preprocessor = build_preprocessor(X_train)
-
-    logger.info("Erzeuge CV-Splits (KFold=%d, seed=%d) – werden für alle Modelle wiederverwendet.", args.cv_splits, args.seed)
+    logger.info(
+        "Erzeuge CV-Splits (KFold=%d, seed=%d) – werden für alle Modelle wiederverwendet.",
+        args.cv_splits,
+        args.seed,
+    )
     kf = KFold(n_splits=args.cv_splits, shuffle=True, random_state=args.seed)
     splits = list(kf.split(X_train))
 
@@ -312,66 +291,64 @@ def main() -> None:
     best_config = None
     best_model_id = None
 
-    for name, builder, use_log in configs:
+    for name, builder, use_log, prep_builder in configs:
         logger.info("=== Analysis: %s (use_log_target=%s) ===", name, use_log)
 
-        # 1) OOF/CV Predictions (gleiche Folds für alle Modelle)
-        oof_pred, cv_rmse_mean, cv_rmse_std = _oof_predictions_from_splits(
-            logger=logger,
-            model_name=name,
-            builder=builder,
-            preprocessor=preprocessor,
-            use_log_target=use_log,
-            X_train=X_train,
-            Y_train=Y_train,
-            splits=splits,
-            nn_verbose=args.nn_verbose and name.startswith("TorchMLP"),
-        )
+        preprocessor = prep_builder(X_train)
 
-        # 2) Fit auf vollem X_train für Holdout-Test-Metriken
-        model = builder(preprocessor, use_log_target=use_log)
-        _maybe_set_n_jobs_max(model)
+        fold_rmses = []
+        oof_pred = np.zeros(len(X_train), dtype=float)
 
-        if args.nn_verbose and name.startswith("TorchMLP"):
-            try:
-                inner_mlp = model.regressor.named_steps["regressor"]
-                inner_mlp.verbose = True
-            except Exception:
-                pass
+        for fold_idx, (tr_idx, va_idx) in enumerate(splits, start=1):
+            logger.info("[%s] CV fold %d/%d: fit", name, fold_idx, args.cv_splits)
 
-        model.fit(X_train, Y_train)
+            X_tr = X_train.iloc[tr_idx]
+            y_tr = Y_train[tr_idx]
 
-        y_pred_test = model.predict(X_test)
+            X_va = X_train.iloc[va_idx]
+            y_va = Y_train[va_idx]
 
-        rmse_test = float(np.sqrt(mean_squared_error(Y_test, y_pred_test)))
-        r2_test = float(r2_score(Y_test, y_pred_test))
+            model = builder(preprocessor, use_log_target=use_log)
+            model.fit(X_tr, y_tr)
 
-        rel_errors_test = (y_pred_test - Y_test) / Y_test
-        mre_test = float(rel_errors_test.mean())
-        mare_test = float(np.abs(rel_errors_test).mean())
+            pred_va = model.predict(X_va)
+            oof_pred[va_idx] = pred_va
 
-        # Für "Worst error" ist OOF sinnvoller als Train-Fit (generalization-like)
-        oof_abs_errors = np.abs(oof_pred - Y_train)
-        max_abs_oof_error = float(oof_abs_errors.max())
+            fold_rmse = rmse(y_va, pred_va)
+            fold_rmses.append(fold_rmse)
 
-        # 3) DB Write: models + train_cv_predictions
-        hyperparams = _extract_hyperparams(model)
+            logger.info("[%s] CV fold %d/%d: RMSE = %.2f", name, fold_idx, args.cv_splits, fold_rmse)
+
+        cv_rmse_mean = float(np.mean(fold_rmses))
+        cv_rmse_std = float(np.std(fold_rmses))
+
+        # Fit final on X_train for test metrics (holdout)
+        final_model = builder(preprocessor, use_log_target=use_log)
+        final_model.fit(X_train, Y_train)
+        r2_t, rmse_t, mae_t, mare_t = eval_on_holdout(final_model, X_test, Y_test)
+
+        mre_t = mre(Y_test, final_model.predict(X_test))
+
+        # best effort max train error
+        abs_err = np.abs(oof_pred - Y_train)
+        max_abs_train_error = float(np.max(abs_err))
 
         model_id = insert_model(
             name=name,
             version=run_version,
-            file_path=None,  # nur Champion bekommt file_path (unten)
-            r2_test=r2_test,
-            rmse_test=rmse_test,
-            mare_test=mare_test,
-            mre_test=mre_test,
+            file_path=None,
+            r2_test=r2_t,
+            rmse_test=rmse_t,
+            mare_test=mae_t,
+            mre_test=mre_t,
             cv_rmse_mean=cv_rmse_mean,
             cv_rmse_std=cv_rmse_std,
-            max_abs_train_error=max_abs_oof_error,
-            hyperparams=hyperparams,
+            max_abs_train_error=max_abs_train_error,
+            hyperparams=_extract_hyperparams(final_model),
             is_champion=False,
         )
 
+        # write OOF rows for PowerBI
         inserted = insert_train_cv_predictions(
             kaggle_ids=ids_train,
             y_true=Y_train,
@@ -384,46 +361,43 @@ def main() -> None:
             name,
             cv_rmse_mean,
             cv_rmse_std,
-            rmse_test,
-            r2_test,
+            rmse_t,
+            r2_t,
             inserted,
         )
 
-        # Champion Tracking
+        results.append((name, cv_rmse_mean, cv_rmse_std, rmse_t, r2_t, model_id))
+
         if cv_rmse_mean < best_cv_rmse:
             best_cv_rmse = cv_rmse_mean
-            best_config = (name, builder, use_log)
+            best_config = (name, builder, use_log, prep_builder)
             best_model_id = model_id
 
-        results.append((name, cv_rmse_mean, cv_rmse_std, rmse_test, r2_test))
-
-    if best_config is None or best_model_id is None:
-        raise RuntimeError("Kein Champion-Modell gefunden – Config-Liste leer?")
-
-    # Champion markieren
-    champion_name, champion_builder, champion_use_log = best_config
-    set_champion_model(best_model_id)
-
+    # Summary
+    results.sort(key=lambda x: x[1])
     logger.info("=== Summary (sorted by CV-RMSE) ===")
-    for name, cv_mean, cv_std, rmse_t, r2_t in sorted(results, key=lambda x: x[1]):
-        logger.info("%-18s | CV-RMSE = %10.2f ± %8.2f | Test RMSE = %10.2f | Test R² = %.4f", name, cv_mean, cv_std, rmse_t, r2_t)
+    for name, mean_, std_, rmse_t, r2_t, _mid in results:
+        logger.info("%-16s | CV-RMSE = %9.2f ± %8.2f | Test RMSE = %9.2f | Test R² = %.4f", name, mean_, std_, rmse_t, r2_t)
 
-    logger.info("Champion: %s (model_id=%s, CV-RMSE=%.2f)", champion_name, best_model_id, best_cv_rmse)
+    assert best_config is not None and best_model_id is not None
+    best_name, best_builder, best_use_log, best_prep_builder = best_config
+    logger.info("Champion: %s (model_id=%s, CV-RMSE=%.2f)", best_name, best_model_id, best_cv_rmse)
 
-    # Champion auf Full-Data neu fitten und speichern (für predict.py)
+    # Fit Champion on full data + save artifact
     logger.info("Fit Champion auf Full-Data und speichere Artifact.")
-    preprocessor_full = build_preprocessor(X)
-    champion_model = champion_builder(preprocessor_full, use_log_target=champion_use_log)
-    _maybe_set_n_jobs_max(champion_model)
-
-    champion_model.fit(X, Y)
-
     models_dir = Path("models")
     models_dir.mkdir(exist_ok=True)
-    out_path = models_dir / f"{champion_name}_{run_version}.joblib"
+
+    preprocessor_full = best_prep_builder(X)
+    champion_model = best_builder(preprocessor_full, use_log_target=best_use_log)
+    champion_model.fit(X, Y)
+
+    out_path = models_dir / f"{best_name}_{run_version}.joblib"
     joblib.dump(champion_model, out_path)
 
+    set_champion_model(best_model_id)
     update_model_file_path(best_model_id, str(out_path))
+
     logger.info("Champion gespeichert: %s", out_path)
 
 
