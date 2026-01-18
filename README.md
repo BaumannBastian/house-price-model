@@ -1,4 +1,4 @@
-# House-Price-Model (Kaggle) – End-to-End ML + Data Engineering (Postgres, Flyway, Power BI)
+# House Prices Model – Reproducible ML + Data Engineering Workflow
 
 Dieses Repo ist ein lokal reproduzierbares End-to-End Projekt rund um das Kaggle-Dataset **House Prices: Advanced Regression Techniques**.
 
