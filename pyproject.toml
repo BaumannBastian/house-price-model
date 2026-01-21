@@ -17,7 +17,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 
 # Option: Dependencies hier pflegen ODER bei requirements.txt lassen.
-# Fürs Erste lassen wir dependencies leer und nutzen weiterhin requirements.txt.
 dependencies = []
 
 [tool.setuptools]

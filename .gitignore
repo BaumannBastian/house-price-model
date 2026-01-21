@@ -33,8 +33,6 @@ data/
 models/
 predictions/
 logs/
-plots/
-notebooks/
 
 # ------------------------------
 # Lokale Secrets

@@ -1,0 +1,19 @@
+# ------------------------------
+# .gitattributes
+#
+# Erzwingt konsistente Line Endings im Repo.
+# - Textdateien werden als LF gespeichert.
+# - Windows checkt sie (falls core.autocrlf=true) sauber aus.
+# ------------------------------
+
+* text=auto eol=lf
+
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+*.ipynb text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.py text eol=lf
+*.sql text eol=lf
