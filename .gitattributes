@@ -17,3 +17,7 @@
 *.yaml text eol=lf
 *.py text eol=lf
 *.sql text eol=lf
+
+# Don’t count notebooks towards language stats
+notebooks/** linguist-documentation
+*.ipynb linguist-documentation
