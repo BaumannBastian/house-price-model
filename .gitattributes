@@ -19,4 +19,4 @@
 *.sql text eol=lf
 
 # Don’t count notebooks towards language stats
-*.ipynb linguist-detectable=false
+*.ipynb -linguist-detectable
