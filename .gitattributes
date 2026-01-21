@@ -6,6 +6,9 @@
 # - Windows checkt sie (falls core.autocrlf=true) sauber aus.
 # ------------------------------
 
+# Don’t count notebooks towards language stats
+*.ipynb -linguist-detectable
+
 * text=auto eol=lf
 
 *.ps1 text eol=crlf
@@ -18,5 +21,3 @@
 *.py text eol=lf
 *.sql text eol=lf
 
-# Don’t count notebooks towards language stats
-*.ipynb -linguist-detectable
