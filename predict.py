@@ -12,19 +12,17 @@
 # - python predict.py --skip-db : keine Predictions in die DB schreiben
 # ------------------------------------
 
-from src.features import missing_value_treatment, new_feature_engineering, ordinal_mapping
-from src.db import (
-    insert_predictions,
-    get_current_champion_id,
-    get_model_file_path,
-    get_latest_model_id_by_name,
-)
+from __future__ import annotations
 
 import argparse
-import pandas as pd
 import joblib
+import pandas as pd
 
 from pathlib import Path
+
+from src.db import get_current_champion_id, get_latest_model_id_by_name, get_model_file_path, insert_predictions
+from src.features import missing_value_treatment, new_feature_engineering, ordinal_mapping
+from src.lakehouse import load_gold_test_features
 
 
 DEFAULT_INPUT_PATH = Path("data/raw/test.csv")
@@ -32,10 +30,9 @@ DEFAULT_OUTPUT_PATH = Path("predictions/predictions.csv")
 
 
 def parse_args() -> argparse.Namespace:
-    """
-    Parst Kommandozeilenargumente für predict.py.
-    """
     parser = argparse.ArgumentParser()
+
+    parser.add_argument("--data-source", choices=["raw", "lakehouse"], default="raw")
 
     parser.add_argument("--input", type=str, default=str(DEFAULT_INPUT_PATH))
     parser.add_argument("--output", type=str, default=str(DEFAULT_OUTPUT_PATH))
@@ -49,10 +46,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_model_path(args: argparse.Namespace) -> tuple[int, Path]:
-    """
-    Bestimmt model_id und file_path anhand von CLI-Args.
-    Default: aktueller Champion.
-    """
     if args.model_id is not None:
         model_id = int(args.model_id)
     elif args.model_name is not None:
@@ -76,29 +69,30 @@ def main() -> None:
 
     model_id, model_path = resolve_model_path(args)
 
-    # Daten laden
-    df = pd.read_csv(args.input)
+    if args.data_source == "lakehouse":
+        df = load_gold_test_features()
+        kaggle_ids = df["Id"].values
+        X = df.drop(columns=["Id"])
+    else:
+        df = pd.read_csv(args.input)
+        kaggle_ids = df["Id"].values
 
-    # Feature Engineering (muss identisch zu train sein)
-    X_raw = df.drop(columns=["Id"])
-    X = missing_value_treatment(X_raw)
-    X = new_feature_engineering(X)
-    X = ordinal_mapping(X)
+        X_raw = df.drop(columns=["Id"])
+        X = missing_value_treatment(X_raw)
+        X = new_feature_engineering(X)
+        X = ordinal_mapping(X)
 
-    # Modell laden + predict
     model = joblib.load(model_path)
     y_pred = model.predict(X)
 
-    # Output schreiben
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    out_df = pd.DataFrame({"Id": df["Id"].values, "SalePrice": y_pred})
+    out_df = pd.DataFrame({"Id": kaggle_ids, "SalePrice": y_pred})
     out_df.to_csv(output_path, index=False)
 
-    # Optional: DB Insert
     if not args.skip_db:
-        n_inserted = insert_predictions(df["Id"].values, y_pred, model_id=model_id)
+        n_inserted = insert_predictions(kaggle_ids, y_pred, model_id=model_id)
         print(f"{n_inserted} Predictions in die Datenbank geschrieben (model_id={model_id}).")
 
     print(f"Predictions gespeichert unter: {output_path.resolve()}")

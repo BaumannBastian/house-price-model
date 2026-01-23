@@ -27,46 +27,31 @@ from __future__ import annotations
 import argparse
 import logging
 import warnings
-from datetime import datetime
-from pathlib import Path
-from typing import Optional, Tuple
-
 import joblib
 import numpy as np
 import pandas as pd
+
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Tuple
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold, train_test_split
 from sklearn.pipeline import Pipeline
 
 from src.data import load_train_data
+from src.db import insert_model, insert_train_cv_predictions, set_champion_model, update_model_file_path
 from src.features import missing_value_treatment, new_feature_engineering, ordinal_mapping
-from src.models import (
-    build_linear_regression_model,
-    build_random_forest_model,
-    build_histogram_based_model,
-)
+from src.lakehouse import load_gold_train_features
+from src.models import build_histogram_based_model, build_linear_regression_model, build_random_forest_model
 from src.nn_models import build_torch_mlp_model
 from src.preprocessing import build_preprocessor
-
-from src.db import (
-    insert_model,
-    insert_train_cv_predictions,
-    set_champion_model,
-    update_model_file_path,
-)
-
-
-# --------------------------------------------------------
-# Logging
-# --------------------------------------------------------
 
 
 def setup_logging(debug: bool) -> logging.Logger:
     logger = logging.getLogger("train")
     logger.setLevel(logging.DEBUG if debug else logging.INFO)
 
-    # Handler nur einmal hinzufügen
     if not logger.handlers:
         ch = logging.StreamHandler()
         ch.setLevel(logging.DEBUG if debug else logging.INFO)
@@ -77,23 +62,14 @@ def setup_logging(debug: bool) -> logging.Logger:
     return logger
 
 
-# --------------------------------------------------------
-# CLI
-# --------------------------------------------------------
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["train-only", "analysis"], default="train-only")
+    parser.add_argument("--data-source", choices=["raw", "lakehouse"], default="raw")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cv-splits", type=int, default=5)
     return parser.parse_args()
-
-
-# --------------------------------------------------------
-# Metrics
-# --------------------------------------------------------
 
 
 def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -114,16 +90,7 @@ def mre(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.mean((y_pred - y_true) / denom))
 
 
-# --------------------------------------------------------
-# CV + Eval
-# --------------------------------------------------------
-
-
-def eval_on_holdout(
-    model: Pipeline,
-    X_test: pd.DataFrame,
-    y_test: np.ndarray,
-) -> Tuple[float, float, float, float]:
+def eval_on_holdout(model: Pipeline, X_test: pd.DataFrame, y_test: np.ndarray) -> Tuple[float, float, float, float]:
     y_pred = model.predict(X_test)
     return (
         float(r2_score(y_test, y_pred)),
@@ -134,10 +101,6 @@ def eval_on_holdout(
 
 
 def _extract_hyperparams(model: Pipeline) -> Optional[dict]:
-    """
-    Versucht, Config/Parameter aus dem letzten Step herauszuziehen.
-    (Best effort, weil scikit-learn Pipelines + TargetTransformer etc.)
-    """
     try:
         if isinstance(model, TransformedTargetRegressor):
             base = model.regressor_
@@ -152,10 +115,8 @@ def _extract_hyperparams(model: Pipeline) -> Optional[dict]:
         if est is None:
             return None
 
-        # TorchMLP / sklearn Modelle haben meist get_params
         if hasattr(est, "get_params"):
             params = est.get_params(deep=False)
-            # Nicht zu groß machen: nur simple types
             simple = {}
             for k, v in params.items():
                 if isinstance(v, (int, float, str, bool, type(None))):
@@ -167,13 +128,7 @@ def _extract_hyperparams(model: Pipeline) -> Optional[dict]:
         return None
 
 
-# --------------------------------------------------------
-# Main
-# --------------------------------------------------------
-
-
 def main() -> None:
-    """Führt train.py im gewählten Modus aus."""
     warnings.filterwarnings("ignore", category=UserWarning)
 
     args = parse_args()
@@ -181,19 +136,19 @@ def main() -> None:
 
     run_version = datetime.now().strftime("%Y%m%d-%H%M%S")
 
-    # Rohdaten laden
-    df = load_train_data()
+    if args.data_source == "lakehouse":
+        df = load_gold_train_features()
+        X = df.drop(columns=["Id", "SalePrice"])
+    else:
+        df = load_train_data()
+        X_raw = df.drop(columns=["Id", "SalePrice"])
+        X = missing_value_treatment(X_raw)
+        X = new_feature_engineering(X)
+        X = ordinal_mapping(X)
+
     kaggle_ids = df["Id"].to_numpy()
     Y = df["SalePrice"].to_numpy()
 
-    X_raw = df.drop(columns=["Id", "SalePrice"])
-
-    # deterministische, zeilenweise Schritte (kein Leakage)
-    X = missing_value_treatment(X_raw)
-    X = new_feature_engineering(X)
-    X = ordinal_mapping(X)
-
-    # Preprocessor-Builder (modell-spezifisch)
     def prep_ohe(df_like):
         return build_preprocessor(df_like, kind="ohe_dense", min_frequency=10, scale_numeric=False)
 
@@ -214,9 +169,6 @@ def main() -> None:
         ("TorchMLP_log", build_torch_mlp_model, True, prep_nn),
     ]
 
-    # ---------------------------------------------------------------------
-    # MODE: train-only
-    # ---------------------------------------------------------------------
     if args.mode == "train-only":
         logger.info("Mode: train-only")
 
@@ -227,9 +179,7 @@ def main() -> None:
             logger.info("=== Train-only: %s (use_log_target=%s) ===", name, use_log)
 
             preprocessor = prep_builder(X)
-
             model = builder(preprocessor, use_log_target=use_log)
-
             model.fit(X, Y)
 
             out_path = models_dir / f"{name}_{run_version}.joblib"
@@ -257,20 +207,9 @@ def main() -> None:
         logger.info("Train-only fertig. Alle Modelle gespeichert.")
         return
 
-    # ---------------------------------------------------------------------
-    # MODE: analysis
-    # ---------------------------------------------------------------------
     logger.info("Mode: analysis")
-    # Erwartet: DB-Schema ist bereits via Flyway vorhanden
 
-    (
-        X_train,
-        X_test,
-        Y_train,
-        Y_test,
-        ids_train,
-        _ids_test,
-    ) = train_test_split(
+    X_train, X_test, Y_train, Y_test, ids_train, _ids_test = train_test_split(
         X,
         Y,
         kaggle_ids,
@@ -278,11 +217,7 @@ def main() -> None:
         random_state=args.seed,
     )
 
-    logger.info(
-        "Erzeuge CV-Splits (KFold=%d, seed=%d) – werden für alle Modelle wiederverwendet.",
-        args.cv_splits,
-        args.seed,
-    )
+    logger.info("Erzeuge CV-Splits (KFold=%d, seed=%d)", args.cv_splits, args.seed)
     kf = KFold(n_splits=args.cv_splits, shuffle=True, random_state=args.seed)
     splits = list(kf.split(X_train))
 
@@ -322,14 +257,12 @@ def main() -> None:
         cv_rmse_mean = float(np.mean(fold_rmses))
         cv_rmse_std = float(np.std(fold_rmses))
 
-        # Fit final on X_train for test metrics (holdout)
         final_model = builder(preprocessor, use_log_target=use_log)
         final_model.fit(X_train, Y_train)
         r2_t, rmse_t, mae_t, mare_t = eval_on_holdout(final_model, X_test, Y_test)
 
         mre_t = mre(Y_test, final_model.predict(X_test))
 
-        # best effort max train error
         abs_err = np.abs(oof_pred - Y_train)
         max_abs_train_error = float(np.max(abs_err))
 
@@ -348,7 +281,6 @@ def main() -> None:
             is_champion=False,
         )
 
-        # write OOF rows for PowerBI
         inserted = insert_train_cv_predictions(
             kaggle_ids=ids_train,
             y_true=Y_train,
@@ -373,7 +305,6 @@ def main() -> None:
             best_config = (name, builder, use_log, prep_builder)
             best_model_id = model_id
 
-    # Summary
     results.sort(key=lambda x: x[1])
     logger.info("=== Summary (sorted by CV-RMSE) ===")
     for name, mean_, std_, rmse_t, r2_t, _mid in results:
@@ -383,7 +314,6 @@ def main() -> None:
     best_name, best_builder, best_use_log, best_prep_builder = best_config
     logger.info("Champion: %s (model_id=%s, CV-RMSE=%.2f)", best_name, best_model_id, best_cv_rmse)
 
-    # Fit Champion on full data + save artifact
     logger.info("Fit Champion auf Full-Data und speichere Artifact.")
     models_dir = Path("models")
     models_dir.mkdir(exist_ok=True)

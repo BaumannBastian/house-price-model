@@ -147,7 +147,7 @@ $ok = $false
 for ($i = 1; $i -le $maxTries; $i++) {
 
     # - nutzt --quiet, damit keine Ausgabe/Encoding-Probleme den ExitCode verfälschen
-    python -m scripts.test_db_connection --quiet *> $null
+    python -m scripts.db.test_db_connection --quiet *> $null
 
     if ($LASTEXITCODE -eq 0) {
         Write-Host "DB ist erreichbar [OK] (Try $i/$maxTries)" -ForegroundColor Green
@@ -221,7 +221,7 @@ else {
 # 5) DB-Verbindung testen
 # --------------------------------------------------------
 Write-Host "Teste DB-Verbindung (python -m scripts.test_db_connection) ..." -ForegroundColor Yellow
-python -m scripts.test_db_connection
+python -m scripts.db.test_db_connection
 if ($LASTEXITCODE -eq 0) {
     Write-Host "Startup-Sequence erfolgreich abgeschlossen [OK]" -ForegroundColor Green
 } else {
