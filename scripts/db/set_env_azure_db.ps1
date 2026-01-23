@@ -12,8 +12,8 @@
 $env:DB_HOST     = "house-price-psql.postgres.database.azure.com"
 $env:DB_PORT     = "5432"
 $env:DB_NAME     = "house_prices"
-$env:DB_USER     = "hpadmin"
-$env:DB_PASSWORD = "n)mNawgCs5bsRHD5%hQ"
+$env:DB_USER     = "user"
+$env:DB_PASSWORD = "password"
 
 $env:DB_SSLMODE  = "require"
 
