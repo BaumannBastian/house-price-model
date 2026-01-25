@@ -4,13 +4,13 @@ Dieses Repo enthält eine end-to-end ML-Pipeline für den Kaggle-Datensatz **Hou
 
 ---
 
-## TL;DR (was läuft hier?)
+## TL;DR
 
 - **Input (RAW):** `data/raw/train.csv` + `data/raw/test.csv` (lokal) **oder** Databricks Feature Store (Gold-Parquet)
 - **Lakehouse (Databricks):** Bronze → Silver → Gold (Feature Engineering) als Parquet in einem Databricks Volume
 - **Training (lokal):** `train.py` (Analysis / Train-only)
 - **Inference (lokal):** `predict.py` (Submission + optional Warehouse-Export)
-- **Warehouse (BigQuery):** RAW-Tabellen laden + Views/Marts erzeugen → Power BI drauf
+- **Warehouse (BigQuery):** RAW-Tabellen laden + Views/Marts erzeugen → Power BI
 
 ---
 
@@ -55,7 +55,7 @@ Dieses Repo enthält eine end-to-end ML-Pipeline für den Kaggle-Datensatz **Hou
 
 ---
 
-## Entry Points (wie starte ich was?)
+## Training
 
 ### 1) Lokal trainieren (CSV → Preprocessing in Python)
 
