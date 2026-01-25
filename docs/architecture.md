@@ -18,110 +18,105 @@ Dieses Dokument beschreibt die Architektur des Projekts: Komponenten, Datenfluss
   - sklearn-Modelle / Wrapper / Factory-Logik
 - `src/nn_models.py`
   - PyTorch MLP + Trainings-/Inference-Wrapper
-- `src/db.py`
-  - DB-Zugriffe (psycopg2): Inserts/Updates für Runs, Predictions, OOF/CV-Outputs
 
 ### 1.2 Orchestrierung (Project Root)
 
 - `train.py`
-  - `train-only`: Full-Fit + Artefakt speichern + Run in DB loggen
-  - `analysis`: KFold-CV (gemeinsame Splits), OOF-Predictions in DB, Champion per CV-RMSE
+  - `train-only`: Full-Fit + Artefakt speichern
+  - `analysis`: KFold-CV, Champion per CV-RMSE
+  - exportiert Warehouse-RAW Tabellen als Parquet nach `data/warehouse/raw/`
 - `predict.py`
-  - lädt Champion und erzeugt Kaggle-Submission; optional Persistenz in DB
-- `start_dev.ps1`
-  - lokaler Entry-Point für Dev: Python-Env, Docker-DB, Migrationen, Connection-Test
+  - lädt Champion und erzeugt Kaggle-Submission
+  - exportiert Warehouse-RAW Tabellen als Parquet nach `data/warehouse/raw/`
 
-### 1.3 Utility-Skripte (`scripts/`)
+### 1.3 Lakehouse (Databricks)
 
-- `scripts/set_env_local_db.ps1`
-  - setzt lokale DB-ENV-Variablen (Default: Docker Postgres)
-- `scripts/set_env_azure_db_example.ps1`
-  - Template für Azure ENV (Secrets lokal, nicht im Repo)
-- `scripts/test_db_connection.py`
-  - Smoke-Test: Verbindung herstellen und einfache Queries ausführen
-- `scripts/show_db_sample.py`
-  - kleine Stichprobe aus Tabellen (Debug/QA)
+- `cloud/databricks/`
+  - `01_bronze_ingest.py`: Ingestion (Bronze)
+  - `02_silver_clean.py`: Cleaning (Silver)
+  - `03_gold_features.py`: Feature Engineering (Gold)
 
-### 1.4 Schema-Management (Flyway)
+Ziel: reproduzierbare Feature-Schichten (Bronze/Silver/Gold) im Databricks Catalog/Schema `house_prices`.
 
-- `sql/migrations/`
-  - `V1__init.sql`: initiales Schema
-  - `V2__align_legacy_schema.sql`: Alignment/Kompatibilität zu bestehender DB
-- Flyway trackt den Stand in `flyway_schema_history`
+### 1.4 Warehouse (BigQuery)
 
-### 1.5 Infrastruktur
+- `cloud/bigquery/`
+  - `load_raw_tables.py`: lädt RAW aus lokalen Parquet-Exports
+  - `marts_views.sql`: Views für BI (MARTS)
+  - `apply_views.py`: erstellt/updated Views
 
-- `docker-compose.yml`
-  - `db` (Postgres 16)
-  - `flyway` (Migration Runner)
-- `Dockerfile`
-  - optional für Containerisierung der Python-App (nicht zwingend fürs lokale Dev)
-- `terraform/` (optional)
-  - Azure PostgreSQL Flexible Server als Cloud-Artifact
+### 1.5 Utility-Skripte
+
+- `scripts/databricks/`
+  - kleine Helfer für lokale Dev-Workflows (z.B. Download aus Databricks Volumes)
 
 ---
 
 ## 2) Datenfluss
 
-### 2.1 Training
+### 2.1 Lakehouse (Bronze → Silver → Gold)
 
-1. `src/data.py` lädt `train.csv`
-2. `src/features.py` + `src/preprocessing.py` bauen Transformationen
-3. Modelltraining in `train.py`
-   - `train-only`: Full-Fit (Train gesamt) und Artefakt (joblib) speichern
-   - `analysis`: KFold-CV
-     - pro Fold: Fit → Predictions → RMSE
-     - OOF-Predictions in `train_cv_predictions`
-4. Metriken + Metadaten pro Run in `models`
-5. Champion-Flag in `models` wird gesetzt (nach CV-RMSE)
+1. Bronze: Rohdaten (CSV) werden in Databricks ingestiert
+2. Silver: Cleaning / Missing Values / grundlegende Normalisierung
+3. Gold: Feature Engineering (finale Trainingsfeatures)
 
-### 2.2 Prediction
+### 2.2 Training (lokal)
 
-1. `src/data.py` lädt `test.csv`
-2. Preprocessing/Features wie beim Training (gleiche Pipeline)
-3. Champion wird geladen
-4. Predictions werden als Kaggle-Submission geschrieben
-5. optional: Persistenz in `predictions` (inkl. `model_id`)
+1. Input:
+   - `data-source=csv`: `data/raw/train.csv` (Preprocessing im Python-Code)
+   - perspektivisch: Gold-Input (Feature Engineering in Databricks)
+2. Modelltraining in `train.py`
+   - `analysis`: KFold-CV → Champion nach CV-RMSE
+   - `train-only`: Full-Fit
+3. Modell-Artefakt wird nach `models/` gespeichert
+4. Output-Tabellen werden als Parquet nach `data/warehouse/raw/` exportiert (Schnittstelle zum Warehouse)
+
+### 2.3 Prediction
+
+1. Input: `data/raw/test.csv`
+2. Champion wird geladen
+3. Predictions:
+   - Kaggle-Submission (`data/submission.csv`)
+   - Warehouse-Exports (`data/warehouse/raw/`)
 
 ---
 
-## 3) Datenmodell (PostgreSQL)
+## 3) Datenmodell (Warehouse)
 
-### 3.1 `models` (Model Registry)
-- Run-Metadaten, Metriken, Hyperparameter/Metadata, Champion-Flag, Zeitstempel
+Das Warehouse ist in Schichten gedacht:
 
-### 3.2 `train_cv_predictions` (OOF/CV Output)
-- pro Kaggle-ID die OOF-Prediction (und abgeleitete Error-Spalten)
-- primäre Datenquelle für Power BI Error Analytics (z.B. Bucket-Auswertungen)
+- **RAW**: direkte Exports aus `train.py`/`predict.py` (Parquet)
+- **CORE**: abgeleitete Tabellen für Analyse (z.B. Buckets/Aggregationen)
+- **MARTS**: Views für BI (Power BI)
 
-### 3.3 `train_predictions` (optional)
-- Fehler pro Sample für Full-Fit (wenn aktiviert)
-
-### 3.4 `predictions`
-- Kaggle-Test-Predictions (z.B. Champion Runs)
-
-### 3.5 `v_predictions_with_model`
-- Convenience-Join (`predictions` ⨝ `models`) für Reporting
+Die aktuelle Implementierung enthält:
+- Loader-Skript (`cloud/bigquery/load_raw_tables.py`)
+- MARTS-Views (`cloud/bigquery/marts_views.sql`) + Runner (`apply_views.py`)
 
 ---
 
 ## 4) Laufzeit-Setups
 
 ### 4.1 Lokal (Default)
-- Postgres via Docker Compose
-- Schema via Flyway Migrationen
-- ENV via `scripts/set_env_local_db.ps1`
-- Entry-Point: `start_dev.ps1`
 
-### 4.2 Azure (optional)
-- Azure PostgreSQL Flexible Server via Terraform
-- SSL/Firewall/ENV sind über `scripts/set_env_azure_db.ps1` steuerbar
-- weiterhin Flyway Migrationen für reproduzierbares Schema
+- Python venv + `requirements.txt`
+- Training/Inference läuft lokal (`train.py`, `predict.py`)
+- Warehouse-Exports werden lokal geschrieben (`data/warehouse/raw/`)
+
+### 4.2 Cloud
+
+- **Databricks**: Lakehouse-Pipeline (Bronze/Silver/Gold)
+- **BigQuery**: Warehouse-Schichten (RAW/CORE/MARTS)
 
 ---
 
-## 5) Notizen zur Cloud-DB (kurz)
+## 5) Artifacts (ältere Infrastruktur)
 
-- lokales Dev ist auf Docker fokussiert; Azure ist optionales Deployment-Artifact
-- Verbindung nach Azure erfordert üblicherweise SSL (`sslmode=require`) und eine passende Firewall-Regel
-- Migrationen bleiben identisch (Flyway), unabhängig vom Zielsystem
+Ein früherer Projektstand ist als Branch erhalten:
+
+- lokale **PostgreSQL** in Docker
+- **Flyway** Migrationen
+- optional **Azure PostgreSQL** (Terraform)
+
+Branch:
+https://github.com/BaumannBastian/house-price-model/tree/artifact/postgres-flyway

@@ -1,0 +1,8 @@
+# ------------------------------------
+# requirements-dev.txt
+#
+# Dev-Dependencies (optional).
+# - pyspark wird fuer lokale Linting/IntelliSense der Databricks-Notebooks genutzt.
+# ------------------------------------
+
+pyspark==3.5.1

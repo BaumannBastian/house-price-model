@@ -2,35 +2,53 @@
 # src/data.py
 #
 # In dieser Python-Datei werden Hilfsfunktionen bereitgestellt, um
-# den Kaggle-House-Prices-Train-Datensatz (und ggf. weitere CSV-Dateien)
-# als Pandas-DataFrames zu laden.
+# den Kaggle-House-Prices-Train-/Test-Datensatz (CSV) sowie optional
+# bereits vorbereitete Gold-Features (Parquet) als Pandas-DataFrames zu laden.
 # ------------------------------------
 
-import pandas as pd
+from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 
-def load_train_data(path: str | Path = "data/raw/train.csv") -> pd.DataFrame:
+
+def load_train_data(path: str | Path = "data/train.csv") -> pd.DataFrame:
+    """Lädt den Kaggle-Train-Datensatz (train.csv) als DataFrame."""
+    return pd.read_csv(Path(path))
+
+
+def load_test_data(path: str | Path = "data/test.csv") -> pd.DataFrame:
+    """Lädt den Kaggle-Test-Datensatz (test.csv) als DataFrame."""
+    return pd.read_csv(Path(path))
+
+
+def load_gold_train_data(
+    path: str | Path = "data/feature_store/train_gold.parquet",
+) -> pd.DataFrame:
+    """Lädt Gold-Train-Features (inkl. SalePrice) als DataFrame.
+
+    Erwartete Spalten:
+      - Id
+      - SalePrice
+      - Feature-Spalten (numerisch)
     """
-    Lädt den Kaggle-Train-Datensatz als Pandas-DataFrame.
+    p = Path(path)
+    if p.suffix.lower() == ".csv":
+        return pd.read_csv(p)
+    return pd.read_parquet(p)
 
-    Diese Funktion kapselt das Einlesen der Rohdaten aus der
-    House-Prices-Kaggle-Challenge und sorgt dafür, dass im gesamten
-    Projekt ein einheitlicher Standardpfad verwendet wird.
 
-    Parameter
-    ----------
-    path : str | pathlib.Path, optional
-        Pfad zur CSV-Datei mit den Trainingsdaten. Standard ist
-        ``"data/raw/train.csv"`` relativ zum Projekt-Root.
+def load_gold_test_data(
+    path: str | Path = "data/feature_store/test_gold.parquet",
+) -> pd.DataFrame:
+    """Lädt Gold-Test-Features als DataFrame.
 
-    Returns
-    -------
-    pandas.DataFrame
-        DataFrame mit allen Spalten des Trainingsdatensatzes genau so,
-        wie sie in der CSV-Datei vorliegen (noch ohne Feature-Engineering,
-        Encoding oder Skalierung).
+    Erwartete Spalten:
+      - Id
+      - Feature-Spalten (numerisch)
     """
-    path = Path(path)
-    return pd.read_csv(path)
+    p = Path(path)
+    if p.suffix.lower() == ".csv":
+        return pd.read_csv(p)
+    return pd.read_parquet(p)

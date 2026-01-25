@@ -1,365 +1,170 @@
-# House Price Model – Reproducible ML + Data Engineering Workflow
+# House-Price-Model (Kaggle)
 
-Dieses Repo ist ein lokal reproduzierbares End-to-End Projekt rund um das Kaggle-Dataset **House Prices: Advanced Regression Techniques**.
-
-Fokus:
-- mehrere Modellfamilien (sklearn + PyTorch) sauber vergleichbar trainieren
-- Modell-Runs + Metriken + OOF/CV-Predictions in **PostgreSQL** persistieren
-- **Power BI** für Monitoring / Error Analytics (z.B. Price-Buckets, Worst Cases)
-- DB-Struktur versioniert und reproduzierbar über **Flyway**
+Dieses Repo enthält eine end-to-end ML-Pipeline für den Kaggle-Datensatz **House Prices (Ames)** – inkl. Feature Engineering im **Databricks Lakehouse**, lokalem Training (scikit-learn + PyTorch) und einem **BigQuery Warehouse** als Schnittstelle für Power BI.
 
 ---
 
-## TL;DR
+## TL;DR (was läuft hier?)
 
-- Lokales Default-Setup: Postgres 16 via Docker Compose
-- DB-Schema: Flyway Migrationen unter `sql/migrations/`
-- Training:
-  - `python train.py` (train-only: Full-Data fit + Artefakt speichern + Run in DB loggen)
-  - `python train.py --mode analysis` (gemeinsame CV-Splits, OOF-Predictions in DB, Champion per CV-RMSE)
-- Prediction:
-  - `python predict.py` (Champion laden, Kaggle-Predictions schreiben, optional in DB speichern)
-- Power BI liest direkt aus der DB (`models`, `train_cv_predictions`, `predictions`)
+- **Input (RAW):** `data/raw/train.csv` + `data/raw/test.csv` (lokal) **oder** Databricks Feature Store (Gold-Parquet)
+- **Lakehouse (Databricks):** Bronze → Silver → Gold (Feature Engineering) als Parquet in einem Databricks Volume
+- **Training (lokal):** `train.py` (Analysis / Train-only)
+- **Inference (lokal):** `predict.py` (Submission + optional Warehouse-Export)
+- **Warehouse (BigQuery):** RAW-Tabellen laden + Views/Marts erzeugen → Power BI drauf
 
 ---
 
 ## Projektstruktur
 
-    .
-    ├─ data/
-    │  └─ raw/                      # train.csv / test.csv, nicht im Repo
-    ├─ scripts/
-    │  ├─ set_env_local_db.ps1
-    │  ├─ set_env_azure_db_example.ps1
-    │  ├─ set_env_azure_db.ps1      # lokal (Secrets), nicht im Repo
-    │  ├─ test_db_connection.py
-    │  └─ show_db_sample.py
-    ├─ sql/
-    │  └─ migrations/
-    │     ├─ V1__init.sql
-    │     └─ V2__align_legacy_schema.sql
-    ├─ src/
-    │  ├─ data.py
-    │  ├─ db.py
-    │  ├─ features.py
-    │  ├─ preprocessing.py
-    │  ├─ models.py
-    │  └─ nn_models.py
-    ├─ models/                      # .joblib Artefakte (lokal)
-    ├─ predictions/                 # Kaggle CSVs (lokal)
-    ├─ docker-compose.yml
-    ├─ start_dev.ps1
-    ├─ train.py
-    └─ predict.py
+```text
+.
+├─ cloud/
+│  ├─ databricks/
+│  │  ├─ 01_bronze_ingest.py
+│  │  ├─ 02_silver_clean.py
+│  │  └─ 03_gold_features.py
+│  └─ bigquery/
+│     └─ marts_views.sql
+├─ data/
+│  ├─ raw/                      # Kaggle CSVs (train.csv / test.csv)
+│  ├─ feature_store/            # Downloaded Gold-Parquet (optional)
+│  └─ warehouse/
+│     └─ raw/                   # reproduzierbare Exports (Parquet) für BigQuery RAW
+├─ docs/
+│  └─ architecture.md
+├─ models/                      # gespeicherte Modelle (.joblib)
+├─ predictions/                 # lokal erzeugte Predictions/Submission
+├─ scripts/
+│  ├─ databricks/
+│  │  └─ download_feature_store.ps1
+│  └─ bigquery/
+│     ├─ load_raw_tables.py
+│     └─ apply_views.py
+├─ src/
+│  ├─ data.py
+│  ├─ features.py
+│  ├─ preprocessing.py
+│  ├─ models.py
+│  └─ nn_models.py
+├─ train.py
+├─ predict.py
+├─ start_dev.ps1
+├─ requirements.txt
+└─ requirements-dev.txt
+```
 
 ---
 
-## Daten
+## Entry Points (wie starte ich was?)
 
-- Datensatz: Kaggle „House Prices: Advanced Regression Techniques“.
-- Rohdaten (nicht im Repo):
-  - `data/raw/train.csv`
-  - `data/raw/test.csv`
+### 1) Lokal trainieren (CSV → Preprocessing in Python)
 
-Lokale Artefakte:
-- `models/*.joblib` (gespeicherte Modelle)
-- `predictions/*.csv` (Kaggle Submissions)
-- `logs/`, `plots/` (optional)
+```powershell
+# aus der venv heraus
+python train.py --mode analysis --data-source csv
+python predict.py --data-source csv
+```
 
----
+### 2) Databricks Lakehouse bauen (Bronze/Silver/Gold)
 
-## Datenbank (PostgreSQL)
+In Databricks (Repo-Integration) die drei Dateien unter `cloud/databricks/` ausführen:
 
-### Tabellen / View
+1. `cloud/databricks/01_bronze_ingest.py`
+2. `cloud/databricks/02_silver_clean.py`
+3. `cloud/databricks/03_gold_features.py`
 
-- `models`
-  - Modell-Registry (Name, Version, Metriken, Hyperparameter/Metadata, Champion-Flag, created_at)
-- `train_cv_predictions`
-  - OOF/CV Predictions + Error-Spalten (für Bucket-Analysen in Power BI)
-- `train_predictions`
-  - optional: Fehler pro Train-Sample (Full-Train Fit; kann bei Overfitting-Checks helfen)
-- `predictions`
-  - Kaggle-Testset Predictions (optional, z.B. Champion)
-- `v_predictions_with_model`
-  - View: `predictions` ⨝ `models` (Reporting-Komfort)
+Ergebnis: **Gold-Parquet** (z. B. `train_gold.parquet`, `test_gold.parquet`) im Volume:
 
-### DB-Konfiguration (ENV)
+- `dbfs:/Volumes/workspace/house_prices/feature_store/`
 
-Die Verbindung wird in `src/db.py` über ENV-Variablen gesteuert:
+### 3) Gold lokal herunterladen (Feature Store → `data/feature_store/`)
 
-- `DB_HOST` – Hostname/FQDN (lokal: `localhost`)
-- `DB_PORT` – Standard: `5432`
-- `DB_NAME` – z.B. `house_prices`
-- `DB_USER` – lokal: `house`
-- `DB_PASSWORD` – lokal: `house`
-- `DB_SSLMODE` – `"disable"` (lokal) oder `"require"` (Azure)
+```powershell
+# braucht Databricks CLI + auth login
+.\scripts\databricks\download_feature_store.ps1
+```
 
-Die ENV-Variablen werden per PowerShell-Skripten gesetzt:
-- lokal (Docker): `scripts/set_env_local_db.ps1`
-- cloud (Azure): `scripts/set_env_azure_db.ps1` (nicht im Repo; Template: `*_example.ps1`)
+Wenn Gold lokal vorhanden ist, kann `train.py` im “Gold-only”-Modus laufen (ohne Preprocessing in Python).
+
+### 4) BigQuery befüllen (RAW) + Views/Marts anwenden
+
+```powershell
+$env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\service_account.json"
+$env:BQ_PROJECT_ID="house-price-model"
+
+python -m scripts.bigquery.load_raw_tables --dataset house_prices_raw
+python -m scripts.bigquery.apply_views --raw house_prices_raw --core house_prices_core --marts house_prices_marts
+```
 
 ---
 
-## DB Schema Management (Flyway)
+## Setup
 
-Das DB-Schema wird ausschließlich über Flyway verwaltet:
+### Empfohlen: `start_dev.ps1` (Entry Point)
 
-- Migrationen liegen unter `sql/migrations/`
-- Flyway führt Migrationen in Reihenfolge aus und trackt den Stand in `flyway_schema_history`
+```powershell
+# einmalig
+python -m venv .venv
 
-Manuell ausführen:
+# Standard: venv aktivieren
+.\start_dev.ps1
 
-    docker compose run --rm --no-deps flyway -connectRetries=60 migrate
+# optional: Dependencies installieren/aktualisieren
+.\start_dev.ps1 -InstallDeps
+```
 
-### Legacy DB (wenn bereits Tabellen existieren)
+### Alternative: Manuell
 
-Falls eine bestehende DB übernommen werden soll:
+#### 1) Python Environment
 
-    docker compose run --rm --no-deps flyway -connectRetries=60 baseline -baselineVersion=1 -baselineDescription="baseline legacy schema"
-    docker compose run --rm --no-deps flyway -connectRetries=60 migrate
+```powershell
+python -m venv .venv
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
 
-Den aktuellen Stand prüfen:
+#### 2) Dependencies
 
-    docker compose run --rm --no-deps flyway -connectRetries=60 info
-
----
-
-## Setup (lokal)
-
-Es gibt zwei Wege:
-
-- **Automatisch (empfohlen):** ein Entry-Point (`start_dev.ps1`) setzt die komplette lokale Dev-Umgebung auf.
-- **Manuell:** einzelne Schritte (venv, Docker DB, ENV, Flyway, Tests) – nützlich zum Debuggen
-
----
-
-### Automatisch (empfohlen): `start_dev.ps1`
-
-    .\start_dev.ps1
-
-Was der Entry-Point macht (high level):
-- aktiviert die Python-venv (falls vorhanden)
-- startet die lokale PostgreSQL-DB via Docker Compose (persistentes Volume)
-- setzt lokale DB-ENV-Variablen (`scripts/set_env_local_db.ps1`)
-- führt Flyway Migrationen aus (`sql/migrations`)
-- prüft die DB-Verbindung (`python -m scripts.test_db_connection`)
-
-Optional: DB-Sample anzeigen
-
-    python -m scripts.show_db_sample --limit 5
+```powershell
+pip install -r requirements.txt
+# optional (Dev/Cloud-Skripte)
+pip install -r requirements-dev.txt
+```
 
 ---
 
-### Manuelles Setup (Debug / granular)
+## Databricks CLI (für `scripts/databricks/*`)
 
-#### 1) Python-Umgebung
+Installieren: siehe Offizielle Anleitung.  
+Login:
 
-    python -m venv .venv
-    .\.venv\Scripts\Activate.ps1
-    pip install -r requirements.txt
-
-#### 2) Lokale DB starten
-
-    docker compose up -d db
-
-#### 3) DB-ENV setzen (lokal)
-
-    . .\scripts\set_env_local_db.ps1
-
-#### 4) Migrationen anwenden (Flyway)
-
-    docker compose run --rm --no-deps flyway -connectRetries=60 migrate
-
-#### 5) Verbindung testen
-
-    python -m scripts.test_db_connection
+```bash
+databricks auth login --host https://<your-workspace>
+```
 
 ---
 
-### Optional: Azure (Artifact)
+## BigQuery (für `scripts/bigquery/*`)
 
-Der Azure-Teil ist optional und nicht erforderlich für lokale Runs.
+Setze die Env-Variable auf deinen Service-Account-Key (JSON):
 
-1) Azure ENV setzen (lokal, nicht committen)
-
-    . .\scripts\set_env_azure_db.ps1
-
-2) Migrationen gegen Azure anwenden (Flyway Container, URL aus ENV)
-
-    docker compose run --rm --no-deps `
-      -e FLYWAY_URL="jdbc:postgresql://$($env:DB_HOST):$($env:DB_PORT)/$($env:DB_NAME)?sslmode=$($env:DB_SSLMODE)" `
-      -e FLYWAY_USER="$($env:DB_USER)" `
-      -e FLYWAY_PASSWORD="$($env:DB_PASSWORD)" `
-      flyway -connectRetries=60 migrate
-
-3) Verbindung testen
-
-    python -m scripts.test_db_connection
+```powershell
+$env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\service_account.json"
+$env:BQ_PROJECT_ID="house-price-model"
+```
 
 ---
 
-## Training
+## Artefakte / Historie (Postgres + Flyway)
 
-### Modus 1: train-only (Default)
+Frühere Versionen dieses Projekts haben eine **PostgreSQL-Datenbank** lokal in Docker sowie optional in **Azure** genutzt, inkl. **Flyway-Migrations** und Views als “Warehouse”-Vorstufe.
 
-Trainiert alle konfigurierten Modelle auf Full-Data, speichert Artefakte in `models/` und loggt einen Run in `models`.
+Diese Variante ist als Artefakt-Branch dokumentiert:
 
-    python train.py
-
-### Modus 2: analysis (CV/OOF + Power BI)
-
-- gemeinsamer Holdout-Split + KFold-CV (gleiche Folds für alle Modelle in diesem Run)
-- OOF-Predictions werden nach `train_cv_predictions` geschrieben
-- Metriken werden nach `models` geschrieben
-- Champion wird per CV-RMSE gesetzt und als Artefakt gespeichert
-
-    python train.py --mode analysis
-
-Hinweis zur Vergleichbarkeit:
-- gleiche CV-Splits pro Run (für fairen Modellvergleich)
-- OOF-Predictions sind die Basis für Bucket-/Outlier-Analysen
+- https://github.com/BaumannBastian/house-price-model/tree/artifact/postgres-flyway
 
 ---
 
-## Prediction (Kaggle Test)
+## Dokumentation
 
-Erzeugt Predictions fürs Kaggle-Testset (CSV unter `predictions/`), typischerweise mit dem aktuellen Champion:
-
-    python predict.py
-
----
-
-## Power BI (Monitoring & Error Analytics)
-
-Der Power BI Report hängt direkt an der PostgreSQL-Datenbank und dient als „Monitoring Layer“ über den Trainingsruns.
-
-**Datenbasis (DB):**
-- `models`: Run-/Modell-Metadaten und Metriken (CV-RMSE, Test-RMSE, R², Champion-Flag, Version/Run)
-- `train_cv_predictions`: Out-of-Fold Predictions inkl. Fehler-Spalten (Abs/Rel Error) für Analyse nach Segmenten (Price-Buckets)
-
-**Ziel:**
-- Modellvergleich pro Run (welches Modell generalisiert am besten? wie stabil ist die CV?)
-- Fehleranalyse entlang von Preissegmenten (wo entstehen systematische Fehler? welche Buckets sind problematisch?)
-- schnelles Identifizieren von Ausreißern/Worst Cases für Debugging (Feature Engineering, Outlier Handling)
-
-### Dashboard – Overview
-
-![Power BI – Dashboard Overview](docs/powerbi/dashboard_overview.png)
-
-Diese Seite zeigt pro Run/Version die wichtigsten Modell-Metriken und markiert den aktuellen Champion. Der Fokus liegt auf der Vergleichbarkeit der Modelle innerhalb eines Runs.
-
-### Error Analytics – Buckets & Absolute Errors
-
-![Power BI – Bucket & Absolute Errors](docs/powerbi/bucket_and_abs_errors.png)
-
-Hier werden die Out-of-Fold Fehler nach Price-Buckets aggregiert. Das ist bewusst OOF/CV-basiert (statt Train-Fit), damit die Visualisierung echte Generalisierungsfehler zeigt und nicht nur Overfitting-Noise.
-
----
-
-## Azure (Artifact / optional)
-
-Optionaler Cloud-Teil:
-- Terraform für Azure PostgreSQL Flexible Server in `terraform/`
-- ENV-Setup lokal über `scripts/set_env_azure_db.ps1` (nicht im Repo)
-
-Hinweis:
-- Cloud-Infrastruktur kann Kosten verursachen und ist für die lokale Ausführung nicht notwendig.
-
----
-
-## Design Notes
-
-- Trennung der Verantwortlichkeiten:
-  - `sql/migrations/*` definiert DB-Struktur (Flyway)
-  - `src/db.py` kapselt DB-Zugriffe (Insert/Update/Query)
-  - `train.py` orchestriert Training / Evaluation / Logging
-  - `src/preprocessing.py` und `src/features.py` kapseln Feature-/Preprocessing-Logik
-- OOF/CV als Grundlage für BI:
-  - Fehleranalysen auf echten OOF-Predictions sind aussagekräftiger als reine Train-Fit Errors
-
----
-
-## Roadmap
-
-- Feature Engineering / Data Engineering zur Verbesserung von CV-RMSE (insb. HistGBR_log & TorchMLP)
-- TorchMLP stabilisieren (Outlier/Target-Transform Consistency, Regularisierung)
-- Optional: CI Smoke-Test (DB up → flyway migrate → basic import/run check)
-
-- Lakehouse / Cloud Data Platform Extension (Snowflake / Databricks / Microsoft Fabric)
-  - Ziel: das Projekt so umbauen, dass es nicht nur lokal mit Postgres läuft, sondern auch in einem „typischen“ Analytics-/DE-Stack.
-  - Schritt 1: Daten-Landing-Zone + Raw/Curated Layer
-    - Kaggle CSVs als "raw" in einen objektbasierten Storage legen (z.B. ADLS/S3, je nach Plattform)
-    - daraus einen "curated" Layer bauen (bereinigte Tabellen + standardisierte Types)
-  - Schritt 2: Feature/Training-Datasets als wiederverwendbare Views/Tabellen
-    - Feature-Dataset als Tabelle/View materialisieren (statt ad-hoc im Training)
-    - klare Versionierung: Dataset-Version ↔ Model-Run (Lineage)
-  - Schritt 3: Reporting-Shift
-    - Power BI direkt auf Snowflake/Databricks/Fabric Semantic Layer anbinden
-    - optional: Modell-Metriken und OOF-Errors als Delta/Lakehouse-Tabellen speichern (statt Postgres)
-  - Schritt 4: Orchestrierung
-    - Jobs/Pipelines (z.B. Databricks Jobs oder Fabric Data Pipelines) für: ingest → transform → train → publish metrics
-
----
-
-## Troubleshooting
-
-### Docker / DB
-
-**DB startet nicht / Connection hängt**
-- Prüfen ob Docker läuft:
-  
-      docker info
-
-- Postgres Logs ansehen:
-
-      docker logs house-price-postgres --tail 100
-
-**DB ist stuck / full reset (Achtung: Datenverlust)**
-- Docker Volume löschen:
-
-      docker compose down -v
-      docker compose up -d db
-
-### Flyway
-
-**Welche Migrationen sind aktiv / Stand prüfen**
-
-    docker compose run --rm --no-deps flyway -connectRetries=60 info
-
-**Migration failed / inkonsistenter History-State**
-- Reparieren:
-
-    docker compose run --rm --no-deps flyway -connectRetries=60 repair
-
-- Danach erneut:
-
-    docker compose run --rm --no-deps flyway -connectRetries=60 migrate
-
-**Legacy DB: V1 soll nicht nochmal laufen**
-- Einmalig baseline setzen, danach normal migrate:
-
-    docker compose run --rm --no-deps flyway -connectRetries=60 baseline -baselineVersion=1 -baselineDescription="baseline legacy schema"
-    docker compose run --rm --no-deps flyway -connectRetries=60 migrate
-
-### Python
-
-**Fehler wegen fehlender Packages**
-
-    pip install -r requirements.txt
-
-**Imports schlagen fehl / falsche venv aktiv**
-- Sicherstellen, dass die venv aktiv ist:
-
-    .\.venv\Scripts\Activate.ps1
-
-- Dann erneut ausführen:
-
-    python train.py --mode analysis
-
-### Power BI
-
-**Power BI zeigt keine neuen Runs**
-- Prüfen, ob `train.py --mode analysis` wirklich Daten in `models` und `train_cv_predictions` geschrieben hat
-- DB Sample anzeigen:
-
-    python -m scripts.show_db_sample --limit 10
+- Architektur: `docs/architecture.md`

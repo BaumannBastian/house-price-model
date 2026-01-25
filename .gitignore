@@ -1,68 +1,35 @@
-# ------------------------------
+# ------------------------------------
 # .gitignore
 #
-# In dieser Datei werden Verzeichnisse/Dateien definiert, die nicht
-# ins Git-Repository eingecheckt werden sollen (Build-Artefakte, Logs,
-# temporäre Dateien, virtuelle Umgebungen usw.).
-# ------------------------------
+# Ignoriert lokale Artefakte, Modelle, Daten und Secrets.
+# ------------------------------------
 
-# ------------------------------
-# Python / venv / Cache
-# ------------------------------
-
-.venv/
-venv/
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
 
-# Tool caches
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Jupyter checkpoints
-.ipynb_checkpoints/
-
-# ------------------------------
-# Lokale Daten & Artefakte (nicht committen)
-# ------------------------------
-
+# Data / Artifacts
 data/
 models/
-predictions/
 logs/
+mlruns/
+predictions/
 
-# ------------------------------
-# Lokale Secrets
-# ------------------------------
+# Secrets / Credentials
+secrets/
+*.key
+*.pem
+*.p12
+*.crt
 
-scripts/set_env_azure_db.ps1
-.env
-.env.*
-
-# ------------------------------
-# Python Build-/Packaging-Artefakte
-# ------------------------------
-
-house_price_model.egg-info/
-build/
-dist/
-
-# ------------------------------
-# IDE / OS
-# ------------------------------
-
+# OS / Editor
+.DS_Store
 .vscode/
 .idea/
-.DS_Store
-Thumbs.db
 
-# ------------------------------
-# Terraform State & Cache
-# ------------------------------
-
-**/.terraform/
-*.tfstate
-*.tfstate.backup
+# Misc
+*.log

@@ -1,108 +1,150 @@
 # ------------------------------------
 # predict.py
 #
-# In dieser Python-Datei wird ein Modell geladen (standardmäßig der Champion),
-# auf den Kaggle-House-Prices-Testdatensatz angewendet, die Vorhersagen werden
-# als CSV gespeichert und zusätzlich in die PostgreSQL-Datenbank geschrieben.
-#
-# Usage
-# ------------------------------------
-# - python predict.py : aktueller Champion aus der DB (models.is_champion = TRUE)
-# - python predict.py --model-name oder --model-id : spezifisches Modell laden
-# - python predict.py --skip-db : keine Predictions in die DB schreiben
+# Dieses Skript lädt ein gespeichertes Modell (.joblib) und erzeugt Kaggle-Predictions.
+# Zusätzlich werden Predictions als Parquet exportiert, sodass sie in BigQuery (raw layer)
+# geladen und in Marts/PowerBI verwendet werden können.
 # ------------------------------------
 
-from src.features import missing_value_treatment, new_feature_engineering, ordinal_mapping
-from src.db import (
-    insert_predictions,
-    get_current_champion_id,
-    get_model_file_path,
-    get_latest_model_id_by_name,
-)
+from __future__ import annotations
 
 import argparse
-import pandas as pd
-import joblib
-
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional, Tuple
+
+import joblib
+import pandas as pd
+
+from src.data import load_gold_test_data, load_test_data
+from src.features import missing_value_treatment, new_feature_engineering, ordinal_mapping
 
 
-DEFAULT_INPUT_PATH = Path("data/raw/test.csv")
-DEFAULT_OUTPUT_PATH = Path("predictions/predictions.csv")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 
-def parse_args() -> argparse.Namespace:
-    """
-    Parst Kommandozeilenargumente für predict.py.
-    """
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--input", type=str, default=str(DEFAULT_INPUT_PATH))
-    parser.add_argument("--output", type=str, default=str(DEFAULT_OUTPUT_PATH))
-
-    parser.add_argument("--model-id", type=int, default=None)
-    parser.add_argument("--model-name", type=str, default=None)
-
-    parser.add_argument("--skip-db", action="store_true")
-
-    return parser.parse_args()
+def _ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
 
 
-def resolve_model_path(args: argparse.Namespace) -> tuple[int, Path]:
-    """
-    Bestimmt model_id und file_path anhand von CLI-Args.
-    Default: aktueller Champion.
-    """
-    if args.model_id is not None:
-        model_id = int(args.model_id)
-    elif args.model_name is not None:
-        model_id = get_latest_model_id_by_name(args.model_name)
-        if model_id is None:
-            raise ValueError(f"Kein Model gefunden mit name={args.model_name}")
+def _resolve_model(
+    models_parquet: Path,
+    model_id: Optional[str],
+    model_name: Optional[str],
+) -> Tuple[str, str, str, Path]:
+    """Ermittelt (model_id, model_name, model_version, file_path) aus models.parquet."""
+    if not models_parquet.exists():
+        raise FileNotFoundError(
+            f"models.parquet nicht gefunden: {models_parquet}. Bitte zuerst 'python train.py --mode analysis' ausführen."
+        )
+
+    df = pd.read_parquet(models_parquet)
+    if df.empty:
+        raise ValueError(f"models.parquet ist leer: {models_parquet}")
+
+    if model_id is not None:
+        sel = df[df["id"].astype(str) == str(model_id)]
+        if sel.empty:
+            raise ValueError(f"Model-ID nicht gefunden in models.parquet: {model_id}")
+        row = sel.sort_values("created_at_utc").iloc[-1]
+    elif model_name is not None:
+        sel = df[df["name"] == model_name]
+        if sel.empty:
+            raise ValueError(f"Model-Name nicht gefunden in models.parquet: {model_name}")
+        row = sel.sort_values("created_at_utc").iloc[-1]
     else:
-        model_id = get_current_champion_id()
-        if model_id is None:
-            raise ValueError("Kein Champion in der DB gesetzt (models.is_champion).")
+        if "is_champion" in df.columns:
+            sel = df[df["is_champion"] == True]
+        else:
+            sel = df.iloc[0:0]
 
-    file_path = get_model_file_path(model_id)
-    if file_path is None:
-        raise ValueError(f"Model file_path ist NULL fuer model_id={model_id}")
+        if sel.empty:
+            row = df.sort_values("created_at_utc").iloc[-1]
+        else:
+            row = sel.sort_values("created_at_utc").iloc[-1]
 
-    return model_id, Path(file_path)
+    mid = str(row["id"])
+    mname = str(row["name"])
+    mver = str(row["version"])
+    fpath = row.get("file_path", None)
+
+    if fpath is None or (isinstance(fpath, float) and pd.isna(fpath)):
+        raise ValueError(f"Für das ausgewählte Modell ist kein file_path gesetzt (id={mid}, name={mname}).")
+
+    return mid, mname, mver, Path(str(fpath))
 
 
 def main() -> None:
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-source", choices=["csv", "gold"], default="csv")
 
-    model_id, model_path = resolve_model_path(args)
+    parser.add_argument("--test-path", default="data/raw/test.csv", help="Pfad zu test.csv (nur bei --data-source csv)")
+    parser.add_argument(
+        "--gold-test-path",
+        default="data/feature_store/test_gold.parquet",
+        help="Pfad zu test_gold.parquet (nur bei --data-source gold)",
+    )
 
-    # Daten laden
-    df = pd.read_csv(args.input)
+    parser.add_argument("--models-parquet", default="data/warehouse/raw/models.parquet")
+    parser.add_argument("--model-id", default=None)
+    parser.add_argument("--model-name", default=None)
 
-    # Feature Engineering (muss identisch zu train sein)
-    X_raw = df.drop(columns=["Id"])
-    X = missing_value_treatment(X_raw)
-    X = new_feature_engineering(X)
-    X = ordinal_mapping(X)
+    parser.add_argument("--output-csv", default="data/submission.csv")
+    parser.add_argument("--warehouse-raw-dir", default="data/warehouse/raw")
 
-    # Modell laden + predict
+    args = parser.parse_args()
+
+    models_parquet = Path(args.models_parquet)
+    model_id, model_name, model_version, model_path = _resolve_model(
+        models_parquet=models_parquet,
+        model_id=args.model_id,
+        model_name=args.model_name,
+    )
+
+    logging.info("Model: %s (%s) | version=%s | path=%s", model_name, model_id, model_version, model_path)
+
     model = joblib.load(model_path)
-    y_pred = model.predict(X)
 
-    # Output schreiben
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.data_source == "csv":
+        df_test = load_test_data(args.test_path)
+        kaggle_ids = df_test["Id"].copy()
+        X = df_test.drop(columns=["Id"])
+        X = missing_value_treatment(X)
+        X = new_feature_engineering(X)
+        X = ordinal_mapping(X)
+    else:
+        df_test = load_gold_test_data(args.gold_test_path)
+        if "Id" not in df_test.columns:
+            raise ValueError("Gold-Test-Daten müssen mindestens die Spalte 'Id' enthalten.")
+        kaggle_ids = df_test["Id"].copy()
+        X = df_test.drop(columns=["Id"])
 
-    out_df = pd.DataFrame({"Id": df["Id"].values, "SalePrice": y_pred})
-    out_df.to_csv(output_path, index=False)
+    pred = model.predict(X)
 
-    # Optional: DB Insert
-    if not args.skip_db:
-        n_inserted = insert_predictions(df["Id"].values, y_pred, model_id=model_id)
-        print(f"{n_inserted} Predictions in die Datenbank geschrieben (model_id={model_id}).")
+    out_csv = Path(args.output_csv)
+    _ensure_dir(out_csv.parent)
 
-    print(f"Predictions gespeichert unter: {output_path.resolve()}")
-    print(f"Verwendetes Modell: model_id={model_id}, file_path={model_path}")
+    submission = pd.DataFrame({"Id": kaggle_ids, "SalePrice": pred})
+    submission.to_csv(out_csv, index=False)
+    logging.info("Submission saved: %s", out_csv)
+
+    created_at_utc = datetime.now(timezone.utc)
+    raw_dir = Path(args.warehouse_raw_dir)
+    _ensure_dir(raw_dir)
+
+    pred_df = pd.DataFrame(
+        {
+            "kaggle_id": kaggle_ids.astype(int),
+            "predicted_price": pred.astype(float),
+            "model_id": model_id,
+            "model_name": model_name,
+            "model_version": model_version,
+            "created_at_utc": created_at_utc,
+        }
+    )
+    pred_df.to_parquet(raw_dir / "predictions.parquet", index=False)
+    logging.info("Export fertig: %s", raw_dir)
 
 
 if __name__ == "__main__":
