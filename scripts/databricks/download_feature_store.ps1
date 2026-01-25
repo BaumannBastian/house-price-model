@@ -1,52 +1,75 @@
 # ------------------------------------
 # scripts/databricks/download_feature_store.ps1
 #
-# Laedt die Gold-Parquet-Dateien (train/test) aus dem Databricks Volume
-# nach data/feature_store/ (lokal).
+# Lädt die aktuellen GOLD-Parquet-Dateien (+ manifest.json) aus Databricks Volumes
+# nach data/feature_store.
 #
-# Erwartete Dateien im Volume:
-# - dbfs:/Volumes/workspace/house_prices/feature_store/train_gold.parquet
-# - dbfs:/Volumes/workspace/house_prices/feature_store/test_gold.parquet
+# Usage
+# ------------------------------------
+#   # optional (wenn du mehrere Databricks-Profile nutzt)
+#   .\scripts\databricks\download_feature_store.ps1 -Profile "basti.baumann@gmx.net"
+#
+#   # default
+#   .\scripts\databricks\download_feature_store.ps1
 # ------------------------------------
 
-$ErrorActionPreference = "Stop"
+param(
+    [string]$RemoteBase = "dbfs:/Volumes/workspace/house_prices/feature_store",
+    [string]$LocalDir = "data/feature_store",
+    [string]$Profile = ""
+)
 
-# Databricks CLI finden (falls nicht im PATH)
-if (-not (Get-Command databricks -ErrorAction SilentlyContinue)) {
-    $cliDir = Join-Path $env:LOCALAPPDATA "DatabricksCLI"
-    $cliExe = Join-Path $cliDir "databricks.exe"
+function Invoke-Databricks {
+    param([string[]]$Args)
 
-    if (Test-Path $cliExe) {
-        $env:Path = "$cliDir;$env:Path"
-    }
-}
-
-if (-not (Get-Command databricks -ErrorAction SilentlyContinue)) {
-    throw "Databricks CLI nicht gefunden. Stelle sicher, dass 'databricks.exe' im PATH ist."
-}
-
-$RemoteBase = "dbfs:/Volumes/workspace/house_prices/feature_store"
-$LocalDir   = "data/feature_store"
-
-New-Item -ItemType Directory -Force $LocalDir | Out-Null
-
-function Copy-OneFile {
-    param(
-        [Parameter(Mandatory=$true)][string]$RemotePath,
-        [Parameter(Mandatory=$true)][string]$LocalPath
-    )
-
-    try {
-        databricks fs ls $RemotePath | Out-Null
-    }
-    catch {
-        throw "Remote-Datei existiert nicht: $RemotePath"
+    if ([string]::IsNullOrWhiteSpace($Profile)) {
+        & databricks @Args
+    } else {
+        & databricks --profile $Profile @Args
     }
 
-    databricks fs cp $RemotePath $LocalPath --overwrite | Out-Null
+    return $LASTEXITCODE
 }
 
-Copy-OneFile "$RemoteBase/train_gold.parquet" (Join-Path $LocalDir "train_gold.parquet")
-Copy-OneFile "$RemoteBase/test_gold.parquet"  (Join-Path $LocalDir "test_gold.parquet")
+New-Item -ItemType Directory -Force -Path $LocalDir | Out-Null
+$LocalDirFull = (Resolve-Path -Path $LocalDir).Path
 
-Write-Host "OK: Feature-Store geladen nach $LocalDir"
+$RemoteManifest = "$RemoteBase/manifest.json"
+$RemoteTrain = "$RemoteBase/train_gold.parquet"
+$RemoteTest  = "$RemoteBase/test_gold.parquet"
+
+$LocalManifest = Join-Path $LocalDirFull "manifest.json"
+$LocalManifestTmp = Join-Path $LocalDirFull "_manifest.remote.json"
+
+$LocalTrain = Join-Path $LocalDirFull "train_gold.parquet"
+$LocalTest  = Join-Path $LocalDirFull "test_gold.parquet"
+
+# 1) Manifest zuerst (damit wir vergleichen können)
+$rc = Invoke-Databricks @("fs","cp",$RemoteManifest,$LocalManifestTmp,"--overwrite")
+if ($rc -ne 0) {
+    throw "Manifest download failed: $RemoteManifest"
+}
+
+$remoteText = Get-Content -Raw -Path $LocalManifestTmp -Encoding UTF8
+$localText = ""
+if (Test-Path $LocalManifest) {
+    $localText = Get-Content -Raw -Path $LocalManifest -Encoding UTF8
+}
+
+if ($localText -eq $remoteText) {
+    Remove-Item -Force $LocalManifestTmp | Out-Null
+    Write-Host "OK: Feature-Store ist bereits aktuell ($LocalDir)."
+    exit 0
+}
+
+# 2) Daten (Parquet) herunterladen
+$rc = Invoke-Databricks @("fs","cp",$RemoteTrain,$LocalTrain,"--overwrite")
+if ($rc -ne 0) { throw "Databricks copy failed: $RemoteTrain -> $LocalTrain" }
+
+$rc = Invoke-Databricks @("fs","cp",$RemoteTest,$LocalTest,"--overwrite")
+if ($rc -ne 0) { throw "Databricks copy failed: $RemoteTest -> $LocalTest" }
+
+# 3) Manifest atomar ersetzen
+Move-Item -Force -Path $LocalManifestTmp -Destination $LocalManifest
+
+Write-Host "OK: Feature-Store geladen nach $LocalDirFull"

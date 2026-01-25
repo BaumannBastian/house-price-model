@@ -40,6 +40,7 @@ import pandas as pd
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import KFold, train_test_split
 
+from scripts.databricks.sync_feature_store import sync_feature_store
 from src.data import load_gold_train_data, load_train_data
 from src.features import missing_value_treatment, new_feature_engineering, ordinal_mapping
 from src.models import (

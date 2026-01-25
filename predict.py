@@ -17,6 +17,7 @@ from typing import Optional, Tuple
 import joblib
 import pandas as pd
 
+from scripts.databricks.sync_feature_store import sync_feature_store
 from src.data import load_gold_test_data, load_test_data
 from src.features import missing_value_treatment, new_feature_engineering, ordinal_mapping
 
@@ -94,6 +95,9 @@ def main() -> None:
     parser.add_argument("--warehouse-raw-dir", default="data/warehouse/raw")
 
     args = parser.parse_args()
+
+    if args.data_source == "gold":
+        sync_feature_store()
 
     models_parquet = Path(args.models_parquet)
     model_id, model_name, model_version, model_path = _resolve_model(

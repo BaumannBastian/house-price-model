@@ -1,77 +1,108 @@
-# ------------------------------------
-# cloud/databricks/03_gold_features.py
-#
-# Erzeugt den GOLD Layer:
-# - Feature Engineering auf Basis der SILVER Tabellen
-# - Schreibt Gold-Delta-Tabellen (Unity Catalog)
-# - Exportiert train/test als Parquet in den Volume "feature_store"
-#
-# Output (Parquet):
-#   /Volumes/workspace/house_prices/feature_store/train_gold.parquet
-#   /Volumes/workspace/house_prices/feature_store/test_gold.parquet
-# ------------------------------------
+# Databricks notebook source
+# 03_gold_features
 
 from __future__ import annotations
 
+import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pyspark.sql import SparkSession
 
-spark = SparkSession.builder.getOrCreate()
-
-# Projekt-Repo-Root finden, damit `src.*` importierbar ist
-repo_root = Path.cwd()
-while repo_root != repo_root.parent and not (repo_root / "src").exists():
-    repo_root = repo_root.parent
-sys.path.insert(0, str(repo_root))
-
-from src.features import apply_feature_engineering  # noqa: E402
-
-
 CATALOG = "workspace"
 SCHEMA = "house_prices"
 
-SILVER_TRAIN_TABLE = f"{CATALOG}.{SCHEMA}.silver_train_clean"
-SILVER_TEST_TABLE = f"{CATALOG}.{SCHEMA}.silver_test_clean"
+# DBFS Volume (für lokalen Download via databricks CLI)
+VOLUME_DIR = Path("/dbfs/Volumes/workspace/house_prices/feature_store")
+TRAIN_PARQUET_NAME = "train_gold.parquet"
+TEST_PARQUET_NAME = "test_gold.parquet"
+MANIFEST_NAME = "manifest.json"
 
-GOLD_TRAIN_TABLE = f"{CATALOG}.{SCHEMA}.gold_train_features"
-GOLD_TEST_TABLE = f"{CATALOG}.{SCHEMA}.gold_test_features"
+spark = SparkSession.builder.getOrCreate()
+spark.sql(f"USE CATALOG {CATALOG}")
+spark.sql(f"USE SCHEMA {SCHEMA}")
 
-# Unity Catalog Volume (tabular/feature output als File)
-VOLUME_NAME = "feature_store"
-VOLUME_DBFS_BASE = f"dbfs:/Volumes/{CATALOG}/{SCHEMA}/{VOLUME_NAME}"
-VOLUME_DRIVER_BASE = f"/dbfs/Volumes/{CATALOG}/{SCHEMA}/{VOLUME_NAME}"
+# Repo-Root finden und src/ importierbar machen
+root = Path.cwd()
+while root != root.parent and not (root / "src").exists():
+    root = root.parent
+if str(root) not in sys.path:
+    sys.path.insert(0, str(root))
 
-
-def main() -> None:
-    # 1) SILVER lesen
-    silver_train = spark.read.table(SILVER_TRAIN_TABLE).toPandas()
-    silver_test = spark.read.table(SILVER_TEST_TABLE).toPandas()
-
-    # 2) Feature Engineering (Pandas, wie lokal)
-    gold_train = apply_feature_engineering(silver_train)
-    gold_test = apply_feature_engineering(silver_test)
-
-    # 3) GOLD Delta-Tabellen schreiben (Unity Catalog)
-    spark.createDataFrame(gold_train).write.mode("overwrite").saveAsTable(GOLD_TRAIN_TABLE)
-    spark.createDataFrame(gold_test).write.mode("overwrite").saveAsTable(GOLD_TEST_TABLE)
-
-    # 4) Parquet in Volume schreiben (als echte Dateien, nicht als Spark-Ordner)
-    out_dir = Path(VOLUME_DRIVER_BASE)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    train_path = out_dir / "train_gold.parquet"
-    test_path = out_dir / "test_gold.parquet"
-
-    gold_train.to_parquet(train_path.as_posix(), index=False)
-    gold_test.to_parquet(test_path.as_posix(), index=False)
-
-    print("OK GOLD fertig.")
-    print(f"- Delta: {GOLD_TRAIN_TABLE}, {GOLD_TEST_TABLE}")
-    print(f"- Parquet: {VOLUME_DBFS_BASE}/train_gold.parquet")
-    print(f"- Parquet: {VOLUME_DBFS_BASE}/test_gold.parquet")
+from src.features import new_feature_engineering, ordinal_mapping  # noqa: E402
 
 
-if __name__ == "__main__":
-    main()
+# -----------------------------
+# Load Silver (Delta -> Pandas)
+# -----------------------------
+silver_train = spark.table(f"{CATALOG}.{SCHEMA}.silver_train_clean").toPandas()
+silver_test = spark.table(f"{CATALOG}.{SCHEMA}.silver_test_clean").toPandas()
+
+# -----------------------------
+# Feature Engineering (Pandas)
+# -----------------------------
+gold_train = ordinal_mapping(new_feature_engineering(silver_train))
+gold_test = ordinal_mapping(new_feature_engineering(silver_test))
+
+# -----------------------------
+# Save Gold as Delta tables
+# -----------------------------
+(
+    spark.createDataFrame(gold_train)
+    .write.format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(f"{CATALOG}.{SCHEMA}.gold_train_features")
+)
+(
+    spark.createDataFrame(gold_test)
+    .write.format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(f"{CATALOG}.{SCHEMA}.gold_test_features")
+)
+
+# -----------------------------
+# Save Gold as Parquet for local training
+# -----------------------------
+VOLUME_DIR.mkdir(parents=True, exist_ok=True)
+
+train_path = VOLUME_DIR / TRAIN_PARQUET_NAME
+test_path = VOLUME_DIR / TEST_PARQUET_NAME
+
+gold_train.to_parquet(train_path, index=False)
+gold_test.to_parquet(test_path, index=False)
+
+# -----------------------------
+# Write manifest (version/stamp)
+# -----------------------------
+manifest = {
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "catalog": CATALOG,
+    "schema": SCHEMA,
+    "volume_dir": "/Volumes/workspace/house_prices/feature_store",
+    "files": {
+        "train": TRAIN_PARQUET_NAME,
+        "test": TEST_PARQUET_NAME,
+    },
+    "rows": {
+        "train": int(len(gold_train)),
+        "test": int(len(gold_test)),
+    },
+    "columns": {
+        "train": list(gold_train.columns),
+        "test": list(gold_test.columns),
+    },
+}
+
+with open(VOLUME_DIR / MANIFEST_NAME, "w", encoding="utf-8") as f:
+    json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+print("Gold tables created:")
+print(f"- {CATALOG}.{SCHEMA}.gold_train_features | rows={len(gold_train)}")
+print(f"- {CATALOG}.{SCHEMA}.gold_test_features  | rows={len(gold_test)}")
+print("Gold parquet exported to volume:")
+print(f"- {train_path}")
+print(f"- {test_path}")
+print(f"- {VOLUME_DIR / MANIFEST_NAME}")
