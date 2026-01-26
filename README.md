@@ -7,10 +7,10 @@ Dieses Repo enthält eine end-to-end ML-Pipeline für den Kaggle-Datensatz **Hou
 ## TL;DR
 
 - **Input (RAW):** `data/raw/train.csv` + `data/raw/test.csv` (lokal) **oder** Databricks Feature Store (Gold-Parquet)
-- **Lakehouse (Databricks):** Bronze → Silver → Gold (Feature Engineering) als Parquet in einem Databricks Volume
+- **Lakehouse (Databricks):** Bronze -> Silver -> Gold (Feature Engineering) als Parquet in einem Databricks Volume
 - **Training (lokal):** `train.py` (Analysis / Train-only)
 - **Inference (lokal):** `predict.py` (Submission + optional Warehouse-Export)
-- **Warehouse (BigQuery):** RAW-Tabellen laden + Views/Marts erzeugen → Power BI
+- **Warehouse (BigQuery):** RAW-Tabellen laden + Views/Marts erzeugen -> Power BI
 
 ---
 
@@ -36,7 +36,11 @@ Dieses Repo enthält eine end-to-end ML-Pipeline für den Kaggle-Datensatz **Hou
 ├─ predictions/                 # lokal erzeugte Predictions/Submission
 ├─ scripts/
 │  ├─ databricks/
-│  │  └─ download_feature_store.ps1
+│  │  ├─ sync_repo.py                 # Databricks Repo auf neuesten Git-Stand bringen
+│  │  ├─ update_jobs_to_repo.py       # Jobs auf /Repos/... Notebooks umstellen (einmalig)
+│  │  ├─ run_lakehouse_jobs.py        # Bronze/Silver/Gold Jobs sequenziell triggern
+│  │  ├─ download_feature_store.ps1   # Gold Parquets lokal nach data/feature_store/ kopieren
+│  │  └─ sync_feature_store.py        # optional: Manifest/Sync-Logic (falls genutzt)
 │  └─ bigquery/
 │     ├─ load_raw_tables.py
 │     └─ apply_views.py
@@ -57,7 +61,7 @@ Dieses Repo enthält eine end-to-end ML-Pipeline für den Kaggle-Datensatz **Hou
 
 ## Training
 
-### 1) Lokal trainieren (CSV → Preprocessing in Python)
+### 1) Lokal trainieren (CSV -> Preprocessing und train/predict in Python)
 
 ```powershell
 # aus der venv heraus
@@ -65,26 +69,66 @@ python train.py --mode analysis --data-source csv
 python predict.py --data-source csv
 ```
 
-### 2) Databricks Lakehouse bauen (Bronze/Silver/Gold)
+### 2) Mit Gold-Data aus Databricks trainieren (databricks parquets -> Preprocessing und train/predict in Python)
 
-In Databricks (Repo-Integration) die drei Dateien unter `cloud/databricks/` ausführen:
+#### Databricks Repo (empfohlen)
 
-1. `cloud/databricks/01_bronze_ingest.py`
-2. `cloud/databricks/02_silver_clean.py`
-3. `cloud/databricks/03_gold_features.py`
+Dieses Projekt nutzt Databricks Repos unter:
 
-Ergebnis: **Gold-Parquet** (z. B. `train_gold.parquet`, `test_gold.parquet`) im Volume:
+- `/Repos/basti.baumann@gmx.net/house-price-model`
+
+Workflow nach einem lokalen `git push`:
+
+1) Repo in Databricks auf den neuesten Stand bringen:
+
+```powershell
+python scripts/databricks/sync_repo.py `
+  --repo-path "/Repos/basti.baumann@gmx.net/house-price-model" `
+  --branch main `
+  --profile "basti.baumann@gmx.net"
+```
+
+Optional: Falls du in Databricks manuell Änderungen gemacht hast und `repos update` wegen Konflikten scheitert,
+kannst du das Repo hart resetten (Backup -> delete -> recreate -> update):
+
+```powershell
+python scripts/databricks/sync_repo.py `
+  --repo-path "/Repos/basti.baumann@gmx.net/house-price-model" `
+  --branch main `
+  --profile "basti.baumann@gmx.net" `
+  --reset-if-conflict --backup
+```
+
+2) Einmalig (nur beim Setup): Jobs so umstellen, dass sie die Repo-Notebooks aus `/Repos/...` nutzen:
+
+```powershell
+python scripts/databricks/update_jobs_to_repo.py `
+  --repo-path "/Repos/basti.baumann@gmx.net/house-price-model" `
+  --profile "basti.baumann@gmx.net"
+```
+
+3) Lakehouse-Jobs triggern (Bronze -> Silver -> Gold):
+
+```powershell
+python scripts/databricks/run_lakehouse_jobs.py --stage all --profile "basti.baumann@gmx.net"
+```
+
+Ergebnis: **Gold-Parquet** im Volume:
 
 - `dbfs:/Volumes/workspace/house_prices/feature_store/`
 
-### 3) Gold lokal herunterladen (Feature Store → `data/feature_store/`)
+### 3) Gold lokal herunterladen (Feature Store -> `data/feature_store/`)
 
 ```powershell
-# braucht Databricks CLI + auth login
 .\scripts\databricks\download_feature_store.ps1
 ```
 
-Wenn Gold lokal vorhanden ist, kann `train.py` im “Gold-only”-Modus laufen (ohne Preprocessing in Python).
+Danach kann lokal im Gold-Modus trainiert werden (ohne Feature Engineering in Python):
+
+```powershell
+python train.py --mode analysis --data-source gold
+python predict.py --data-source gold
+```
 
 ### 4) BigQuery befüllen (RAW) + Views/Marts anwenden
 
@@ -115,7 +159,7 @@ python -m venv .venv
 
 ### Alternative: Manuell
 
-#### 1) Python Environment
+#### Python Environment
 
 ```powershell
 python -m venv .venv
@@ -123,7 +167,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-#### 2) Dependencies
+#### Dependencies
 
 ```powershell
 pip install -r requirements.txt
@@ -135,11 +179,18 @@ pip install -r requirements-dev.txt
 
 ## Databricks CLI (für `scripts/databricks/*`)
 
-Installieren: siehe Offizielle Anleitung.  
-Login:
+Installieren: siehe offizielle Anleitung.  
+Profile/Auth prüfen:
 
-```bash
-databricks auth login --host https://<your-workspace>
+```powershell
+databricks auth profiles
+databricks auth describe
+```
+
+Wenn du ein Profil anlegen willst:
+
+```powershell
+databricks auth login --profile "basti.baumann@gmx.net" --host https://dbc-ab8461ec-389b.cloud.databricks.com
 ```
 
 ---

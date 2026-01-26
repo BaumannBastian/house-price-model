@@ -178,7 +178,7 @@ def main() -> None:
 
     print("\nSyncing branch...")
     repos_update(repo_path, args.branch, profile)
-    print("\n✅ Repo hard-reset + synced.")
+    print("\n Repo hard-reset + synced.")
 
 
 if __name__ == "__main__":
