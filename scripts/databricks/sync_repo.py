@@ -154,7 +154,7 @@ def main() -> None:
     try:
         print("\nSyncing repo (repos update)...")
         repos_update(ref, args.branch, profile)
-        print("\n✅ Repo synced.")
+        print("\n Repo synced.")
         return
     except Exception as e:
         print("\n⚠️ repos update failed (likely local changes/merge conflict in Databricks).")

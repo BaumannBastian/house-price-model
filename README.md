@@ -1,6 +1,6 @@
 # House-Price-Model (Kaggle)
 
-Dieses Repo enthält eine end-to-end ML-Pipeline für den Kaggle-Datensatz **House Prices (Ames)** – inkl. Feature Engineering im **Databricks Lakehouse**, lokalem Training (scikit-learn + PyTorch) und einem **BigQuery Warehouse** als Schnittstelle für Power BI.
+Dieses Repo enthält eine end-to-end ML-Pipeline für den Kaggle-Datensatz **House Prices** – inkl. Feature Engineering im **Databricks Lakehouse**, lokalem Training (**scikit-learn + PyTorch**) und einem **BigQuery Warehouse** als Schnittstelle für **Power BI**.
 
 ---
 
@@ -69,51 +69,78 @@ python train.py --mode analysis --data-source csv
 python predict.py --data-source csv
 ```
 
-### 2) Mit Gold-Data aus Databricks trainieren (databricks parquets -> Preprocessing und train/predict in Python)
+### 2) Mit Gold-Data aus Databricks trainieren (Databricks Parquets -> train/predict in Python)
 
-#### Databricks Repo (empfohlen)
+#### Databricks Repo: Git-Sync und Job-Ausführung
 
-Dieses Projekt nutzt Databricks Repos unter:
+Ziel: Databricks Jobs sollen immer den aktuellen Code-Stand aus einem **Databricks Repo** verwenden.
 
-- `/Repos/basti.baumann@gmx.net/house-price-model`
+Konventionen/Placeholders:
 
-Workflow nach einem lokalen `git push`:
+- `<DATABRICKS_PROFILE>`: Databricks CLI Profile-Name
+- `<DATABRICKS_REPO_PATH>`: Repo-Pfad in Databricks (Repos Feature)
+- `<GIT_REPO_URL>`: GitHub Repo URL
 
-1) Repo in Databricks auf den neuesten Stand bringen:
+Beispielwerte (anpassen):
+
+- `<GIT_REPO_URL>`: `https://github.com/<ORG_OR_USER>/house-price-model.git`
+- `<DATABRICKS_REPO_PATH>`: `/Repos/<USERNAME>/house-price-model`
+
+#### A) One-time Setup (Repo anlegen und Jobs auf Repo-Notebooks umstellen)
+
+1) Databricks Repo erstellen:
 
 ```powershell
-python scripts/databricks/sync_repo.py `
-  --repo-path "/Repos/basti.baumann@gmx.net/house-price-model" `
-  --branch main `
-  --profile "basti.baumann@gmx.net"
+databricks repos create <GIT_REPO_URL> gitHub --path "<DATABRICKS_REPO_PATH>" --profile "<DATABRICKS_PROFILE>"
 ```
 
-Optional: Falls du in Databricks manuell Änderungen gemacht hast und `repos update` wegen Konflikten scheitert,
-kannst du das Repo hart resetten (Backup -> delete -> recreate -> update):
-
-```powershell
-python scripts/databricks/sync_repo.py `
-  --repo-path "/Repos/basti.baumann@gmx.net/house-price-model" `
-  --branch main `
-  --profile "basti.baumann@gmx.net" `
-  --reset-if-conflict --backup
-```
-
-2) Einmalig (nur beim Setup): Jobs so umstellen, dass sie die Repo-Notebooks aus `/Repos/...` nutzen:
+2) Jobs so umstellen, dass sie Notebooks aus `<DATABRICKS_REPO_PATH>` verwenden:
 
 ```powershell
 python scripts/databricks/update_jobs_to_repo.py `
-  --repo-path "/Repos/basti.baumann@gmx.net/house-price-model" `
-  --profile "basti.baumann@gmx.net"
+  --repo-path "<DATABRICKS_REPO_PATH>" `
+  --profile "<DATABRICKS_PROFILE>"
 ```
 
-3) Lakehouse-Jobs triggern (Bronze -> Silver -> Gold):
+Hinweis: Dieser Schritt ist nur beim Setup oder nach strukturellen Notebook-Pfadänderungen erforderlich.
+
+#### B) Standard-Workflow nach `git push` (Repo syncen, Jobs laufen lassen)
+
+1) Repo in Databricks auf den neuesten Git-Stand bringen:
 
 ```powershell
-python scripts/databricks/run_lakehouse_jobs.py --stage all --profile "basti.baumann@gmx.net"
+python scripts/databricks/sync_repo.py `
+  --repo-path "<DATABRICKS_REPO_PATH>" `
+  --branch main `
+  --profile "<DATABRICKS_PROFILE>"
 ```
 
-Ergebnis: **Gold-Parquet** im Volume:
+2) Lakehouse-Jobs triggern (Bronze -> Silver -> Gold):
+
+```powershell
+python scripts/databricks/run_lakehouse_jobs.py --stage all --profile "<DATABRICKS_PROFILE>"
+```
+
+#### C) Konflikte durch manuelle Änderungen in Databricks behandeln (Hard Reset)
+
+Wenn `repos update` aufgrund lokaler Änderungen/Conflicts im Databricks Repo fehlschlägt, kann das Repo automatisiert zurückgesetzt werden:
+
+- Backup des Workspace-Ordners (optional)
+- Repo löschen
+- Repo neu anlegen
+- Branch neu auschecken
+
+```powershell
+python scripts/databricks/sync_repo.py `
+  --repo-path "<DATABRICKS_REPO_PATH>" `
+  --branch main `
+  --profile "<DATABRICKS_PROFILE>" `
+  --reset-if-conflict --backup
+```
+
+#### D) Ergebnis: Gold-Parquet im Databricks Volume
+
+Nach erfolgreichem Gold-Job liegen die Artefakte im Volume, z. B.:
 
 - `dbfs:/Volumes/workspace/house_prices/feature_store/`
 
@@ -179,19 +206,25 @@ pip install -r requirements-dev.txt
 
 ## Databricks CLI (für `scripts/databricks/*`)
 
-Installieren: siehe offizielle Anleitung.  
-Profile/Auth prüfen:
+Installation und Authentifizierung erfolgen über die Databricks CLI.
+
+Auth/Profiles prüfen:
 
 ```powershell
 databricks auth profiles
 databricks auth describe
 ```
 
-Wenn du ein Profil anlegen willst:
+Profil anlegen (Beispiel):
 
 ```powershell
-databricks auth login --profile "basti.baumann@gmx.net" --host https://dbc-ab8461ec-389b.cloud.databricks.com
+databricks auth login --profile "<DATABRICKS_PROFILE>" --host "<DATABRICKS_HOST>"
 ```
+
+Beispiele für Placeholders:
+
+- `<DATABRICKS_PROFILE>`: `DEFAULT` oder ein Projektprofilname (z. B. `dev`)
+- `<DATABRICKS_HOST>`: `https://<your-workspace>.cloud.databricks.com`
 
 ---
 
