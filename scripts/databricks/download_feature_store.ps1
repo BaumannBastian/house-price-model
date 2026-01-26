@@ -1,75 +1,80 @@
 # ------------------------------------
 # scripts/databricks/download_feature_store.ps1
 #
-# Lädt die aktuellen GOLD-Parquet-Dateien (+ manifest.json) aus Databricks Volumes
-# nach data/feature_store.
+# Lädt die Gold-Feature-Store Artefakte (manifest.json + Parquets) aus Databricks
+# nach lokal: data/feature_store/
 #
 # Usage
 # ------------------------------------
-#   # optional (wenn du mehrere Databricks-Profile nutzt)
-#   .\scripts\databricks\download_feature_store.ps1 -Profile "basti.baumann@gmx.net"
-#
-#   # default
 #   .\scripts\databricks\download_feature_store.ps1
+#   .\scripts\databricks\download_feature_store.ps1 -Force
+#   .\scripts\databricks\download_feature_store.ps1 -Profile "basti.baumann@gmx.net"
 # ------------------------------------
 
+[CmdletBinding()]
 param(
-    [string]$RemoteBase = "dbfs:/Volumes/workspace/house_prices/feature_store",
-    [string]$LocalDir = "data/feature_store",
-    [string]$Profile = ""
+  [string]$RemoteDir = "dbfs:/Volumes/workspace/house_prices/feature_store",
+  [switch]$Force,
+  [string]$Profile = $env:DATABRICKS_CONFIG_PROFILE
 )
 
-function Invoke-Databricks {
-    param([string[]]$Args)
+$ErrorActionPreference = "Stop"
 
-    if ([string]::IsNullOrWhiteSpace($Profile)) {
-        & databricks @Args
-    } else {
-        & databricks --profile $Profile @Args
-    }
-
-    return $LASTEXITCODE
-}
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$LocalDir = Join-Path $RepoRoot "data\feature_store"
 
 New-Item -ItemType Directory -Force -Path $LocalDir | Out-Null
-$LocalDirFull = (Resolve-Path -Path $LocalDir).Path
 
-$RemoteManifest = "$RemoteBase/manifest.json"
-$RemoteTrain = "$RemoteBase/train_gold.parquet"
-$RemoteTest  = "$RemoteBase/test_gold.parquet"
+$RemoteManifest = "$RemoteDir/manifest.json"
+$RemoteTrain    = "$RemoteDir/train_gold.parquet"
+$RemoteTest     = "$RemoteDir/test_gold.parquet"
 
-$LocalManifest = Join-Path $LocalDirFull "manifest.json"
-$LocalManifestTmp = Join-Path $LocalDirFull "_manifest.remote.json"
+$LocalManifest      = Join-Path $LocalDir "manifest.json"
+$LocalManifestTmp   = Join-Path $LocalDir "manifest.remote.json"
+$LocalTrain         = Join-Path $LocalDir "train_gold.parquet"
+$LocalTest          = Join-Path $LocalDir "test_gold.parquet"
 
-$LocalTrain = Join-Path $LocalDirFull "train_gold.parquet"
-$LocalTest  = Join-Path $LocalDirFull "test_gold.parquet"
-
-# 1) Manifest zuerst (damit wir vergleichen können)
-$rc = Invoke-Databricks @("fs","cp",$RemoteManifest,$LocalManifestTmp,"--overwrite")
-if ($rc -ne 0) {
-    throw "Manifest download failed: $RemoteManifest"
+$ProfileArgs = @()
+if ($Profile -and $Profile.Trim() -ne "") {
+  $ProfileArgs = @("--profile", $Profile)
 }
 
-$remoteText = Get-Content -Raw -Path $LocalManifestTmp -Encoding UTF8
-$localText = ""
-if (Test-Path $LocalManifest) {
-    $localText = Get-Content -Raw -Path $LocalManifest -Encoding UTF8
+function Dbx {
+  param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
+  databricks @ProfileArgs @Args | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "Databricks CLI failed: databricks $($Args -join ' ')" }
 }
 
-if ($localText -eq $remoteText) {
-    Remove-Item -Force $LocalManifestTmp | Out-Null
-    Write-Host "OK: Feature-Store ist bereits aktuell ($LocalDir)."
+function Copy-FromDbx([string]$src, [string]$dst) {
+  Write-Host "Downloading: $src -> $dst"
+  Dbx fs cp $src $dst --overwrite
+}
+
+function HashOrEmpty([string]$path) {
+  if (-not (Test-Path $path)) { return "" }
+  return (Get-FileHash $path -Algorithm SHA256).Hash
+}
+
+Write-Host "Profile  : $($Profile -or '(default)')"
+Write-Host "RemoteDir: $RemoteDir"
+Dbx fs ls $RemoteDir
+
+Copy-FromDbx $RemoteManifest $LocalManifestTmp
+
+if (-not $Force) {
+  $hLocal  = HashOrEmpty $LocalManifest
+  $hRemote = HashOrEmpty $LocalManifestTmp
+  if ($hLocal -ne "" -and $hLocal -eq $hRemote) {
+    Remove-Item -Force $LocalManifestTmp
+    Write-Host "OK: Feature store up-to-date (manifest unverändert)."
     exit 0
+  }
 }
 
-# 2) Daten (Parquet) herunterladen
-$rc = Invoke-Databricks @("fs","cp",$RemoteTrain,$LocalTrain,"--overwrite")
-if ($rc -ne 0) { throw "Databricks copy failed: $RemoteTrain -> $LocalTrain" }
+Copy-FromDbx $RemoteTrain $LocalTrain
+Copy-FromDbx $RemoteTest  $LocalTest
 
-$rc = Invoke-Databricks @("fs","cp",$RemoteTest,$LocalTest,"--overwrite")
-if ($rc -ne 0) { throw "Databricks copy failed: $RemoteTest -> $LocalTest" }
+Move-Item -Force $LocalManifestTmp $LocalManifest
 
-# 3) Manifest atomar ersetzen
-Move-Item -Force -Path $LocalManifestTmp -Destination $LocalManifest
-
-Write-Host "OK: Feature-Store geladen nach $LocalDirFull"
+Write-Host "DONE. Lokale Dateien:"
+Get-ChildItem $LocalDir | Format-Table Name, Length, LastWriteTime

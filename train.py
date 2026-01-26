@@ -164,21 +164,23 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if args.data_source == "gold":
+        sync_feature_store()
+
     run_version = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     created_at_utc = datetime.now(timezone.utc)
 
     if args.data_source == "csv":
         X, y, kaggle_ids = _prepare_xy_from_csv(args.input)
-        prep_dense = build_preprocessor(X, kind="ohe_dense", scale_numeric=False)
-        prep_tree = prep_dense
-        prep_nn = build_preprocessor(X, kind="ohe_dense", scale_numeric=True)
-        prep_hgb = build_preprocessor(X, kind="hgb_native")
     else:
         X, y, kaggle_ids = _prepare_xy_from_gold(args.gold_train_path)
-        prep_dense = "passthrough"
-        prep_tree = "passthrough"
-        prep_nn = "passthrough"
-        prep_hgb = "passthrough"
+
+    # ab hier: IDENTISCH in beiden Modi
+    prep_dense = build_preprocessor(X, kind="ohe_dense", scale_numeric=False)
+    prep_tree  = prep_dense
+    prep_nn    = build_preprocessor(X, kind="ohe_dense", scale_numeric=True)
+    prep_hgb   = build_preprocessor(X, kind="hgb_native")
+
 
     X_train, X_test, y_train, y_test, ids_train, ids_test = train_test_split(
         X,
