@@ -2,8 +2,25 @@
 # predict.py
 #
 # Dieses Skript lädt ein gespeichertes Modell (.joblib) und erzeugt Kaggle-Predictions.
-# Zusätzlich werden Predictions als Parquet exportiert, sodass sie in BigQuery (raw layer)
-# geladen und in Marts/PowerBI verwendet werden können.
+# Zusätzlich werden Predictions exportiert, sodass sie
+# in BigQuery (raw layer) geladen und später in Marts/PowerBI verwendet werden können.
+#
+# Outputs
+# ------------------------------------
+# 1) data/processed (CSV, append) -> Historie aller Prediction-Runs
+# 2) data/warehouse/raw (Parquet, overwrite) -> Snapshot des letzten Prediction-Runs (für BigQuery Upload)
+#
+# Modell-Auswahl
+# ------------------------------------
+# - Default: nimmt das neueste Champion-Modell aus data/warehouse/raw/models.parquet
+# - Optional: Auswahl über --model-name oder --model-id
+#
+# Usage
+# ------------------------------------
+# - python predict.py
+# - python predict.py --data-source gold
+# - python predict.py --data-source gold --model-name HistGBR_log
+# - python predict.py --data-source gold --model-id <MODEL_ID>
 # ------------------------------------
 
 from __future__ import annotations
@@ -27,6 +44,28 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def _append_csv(df: pd.DataFrame, path: Path) -> None:
+    """Append DataFrame to CSV (create with header if missing)."""
+    _ensure_dir(path.parent)
+
+    if path.exists():
+        existing_cols = None
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                header = f.readline().strip()
+            if header:
+                existing_cols = header.split(",")
+        except Exception:
+            existing_cols = None
+
+        if existing_cols and set(existing_cols) == set(df.columns):
+            df = df[existing_cols]
+
+        df.to_csv(path, mode="a", header=False, index=False)
+    else:
+        df.to_csv(path, mode="w", header=True, index=False)
 
 
 def _resolve_model(
@@ -93,6 +132,7 @@ def main() -> None:
 
     parser.add_argument("--output-csv", default="data/submission.csv")
     parser.add_argument("--warehouse-raw-dir", default="data/warehouse/raw")
+    parser.add_argument("--processed-dir", default="data/processed")
 
     args = parser.parse_args()
 
@@ -137,6 +177,9 @@ def main() -> None:
     raw_dir = Path(args.warehouse_raw_dir)
     _ensure_dir(raw_dir)
 
+    processed_dir = Path(args.processed_dir)
+    _ensure_dir(processed_dir)
+
     pred_df = pd.DataFrame(
         {
             "kaggle_id": kaggle_ids.astype(int),
@@ -147,7 +190,10 @@ def main() -> None:
             "created_at_utc": created_at_utc,
         }
     )
+
     pred_df.to_parquet(raw_dir / "predictions.parquet", index=False)
+    _append_csv(pred_df, processed_dir / "predictions.csv")
+
     logging.info("Export fertig: %s", raw_dir)
 
 

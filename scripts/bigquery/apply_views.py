@@ -1,19 +1,19 @@
 # ------------------------------------
 # scripts/bigquery/apply_views.py
 #
-# Erstellt/aktualisiert MARTS Views in BigQuery.
+# Erstellt/aktualisiert CORE und MARTS Views in BigQuery.
 #
 # Usage
 # ------------------------------------
 #   $env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\service_account.json"
 #   $env:BQ_PROJECT_ID="house-price-model"
+#
 #   python -m scripts.bigquery.apply_views
 # ------------------------------------
 
 from __future__ import annotations
 
 import argparse
-
 import logging
 from pathlib import Path
 
@@ -35,23 +35,28 @@ def setup_logging(debug: bool) -> logging.Logger:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Apply BigQuery views (MARTS).")
+    p = argparse.ArgumentParser(description="Apply BigQuery views (CORE/MARTS).")
     p.add_argument("--project", type=str, default=None, help="GCP project id (env: BQ_PROJECT_ID)")
     p.add_argument("--raw", type=str, default="house_prices_raw")
     p.add_argument("--core", type=str, default="house_prices_core")
     p.add_argument("--marts", type=str, default="house_prices_marts")
+    p.add_argument("--location", type=str, default="EU")
     p.add_argument("--sql", type=str, default="cloud/bigquery/marts_views.sql")
     p.add_argument("--debug", action="store_true")
     return p.parse_args()
 
 
-def _ensure_dataset(client: bigquery.Client, dataset_id: str, logger: logging.Logger) -> None:
+def _ensure_dataset(client: bigquery.Client, dataset_id: str, location: str, logger: logging.Logger) -> None:
     try:
         client.get_dataset(dataset_id)
         return
     except Exception:
         pass
-    client.create_dataset(bigquery.Dataset(dataset_id))
+
+    ds = bigquery.Dataset(dataset_id)
+    if location:
+        ds.location = location
+    client.create_dataset(ds)
     logger.info("Dataset erstellt: %s", dataset_id)
 
 
@@ -69,8 +74,8 @@ def main() -> int:
 
     client = bigquery.Client(project=project)
 
-    _ensure_dataset(client, f"{project}.{args.core}", logger)
-    _ensure_dataset(client, f"{project}.{args.marts}", logger)
+    _ensure_dataset(client, f"{project}.{args.core}", args.location, logger)
+    _ensure_dataset(client, f"{project}.{args.marts}", args.location, logger)
 
     sql_path = Path(args.sql)
     sql = sql_path.read_text(encoding="utf-8")

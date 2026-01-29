@@ -3,8 +3,13 @@
 #
 # Dieses Skript trainiert mehrere Modelle für das Kaggle House Prices Projekt.
 # Die Modelle werden als .joblib Artefakte gespeichert. Zusätzlich werden
-# die wichtigsten Laufzeitdaten als Parquet-Dateien exportiert, sodass sie
+# die wichtigsten Laufzeitdaten exportiert, sodass sie
 # in BigQuery (raw layer) geladen und später in Marts/PowerBI genutzt werden können.
+#
+# Outputs
+# ------------------------------------
+# 1) data/processed (CSV, append) -> Historie aller Runs (zum direkten Nachschauen)
+# 2) data/warehouse/raw (Parquet, overwrite) -> Snapshot des letzten Runs (für BigQuery Upload)
 #
 # Struktur
 # ------------------------------------
@@ -14,7 +19,7 @@
 #
 # - analysis
 #   Führt eine KFold-CV (gemeinsame Splits für alle Modelle) durch,
-#   exportiert OOF-Predictions und Model-Metriken als Parquet
+#   exportiert OOF-Predictions und Model-Metriken
 #   und setzt den Champion nach CV-RMSE.
 #
 # Usage
@@ -69,6 +74,28 @@ def _ensure_dir(path: Path) -> None:
 def _export_parquet(df: pd.DataFrame, path: Path) -> None:
     _ensure_dir(path.parent)
     df.to_parquet(path, index=False)
+
+
+def _append_csv(df: pd.DataFrame, path: Path) -> None:
+    """Append DataFrame to CSV (create with header if missing)."""
+    _ensure_dir(path.parent)
+
+    if path.exists():
+        existing_cols = None
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                header = f.readline().strip()
+            if header:
+                existing_cols = header.split(",")
+        except Exception:
+            existing_cols = None
+
+        if existing_cols and set(existing_cols) == set(df.columns):
+            df = df[existing_cols]
+
+        df.to_csv(path, mode="a", header=False, index=False)
+    else:
+        df.to_csv(path, mode="w", header=True, index=False)
 
 
 def _cv_oof_predictions(
@@ -161,6 +188,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default="models")
     parser.add_argument("--warehouse-raw-dir", default="data/warehouse/raw")
+    parser.add_argument("--processed-dir", default="data/processed")
 
     args = parser.parse_args()
 
@@ -175,12 +203,10 @@ def main() -> None:
     else:
         X, y, kaggle_ids = _prepare_xy_from_gold(args.gold_train_path)
 
-    # ab hier: IDENTISCH in beiden Modi
     prep_dense = build_preprocessor(X, kind="ohe_dense", scale_numeric=False)
-    prep_tree  = prep_dense
-    prep_nn    = build_preprocessor(X, kind="ohe_dense", scale_numeric=True)
-    prep_hgb   = build_preprocessor(X, kind="hgb_native")
-
+    prep_tree = prep_dense
+    prep_nn = build_preprocessor(X, kind="ohe_dense", scale_numeric=True)
+    prep_hgb = build_preprocessor(X, kind="hgb_native")
 
     X_train, X_test, y_train, y_test, ids_train, ids_test = train_test_split(
         X,
@@ -241,6 +267,9 @@ def main() -> None:
     warehouse_raw_dir = Path(args.warehouse_raw_dir)
     _ensure_dir(warehouse_raw_dir)
 
+    processed_dir = Path(args.processed_dir)
+    _ensure_dir(processed_dir)
+
     if args.mode == "train-only":
         best_name = None
         best_rmse = float("inf")
@@ -283,7 +312,9 @@ def main() -> None:
                 }
             ]
         )
+
         _export_parquet(models_df, warehouse_raw_dir / "models.parquet")
+        _append_csv(models_df, processed_dir / "models.csv")
         return
 
     model_rows: List[Dict[str, object]] = []
@@ -379,6 +410,9 @@ def main() -> None:
 
     _export_parquet(models_df, warehouse_raw_dir / "models.parquet")
     _export_parquet(oof_df, warehouse_raw_dir / "train_cv_predictions.parquet")
+
+    _append_csv(models_df, processed_dir / "models.csv")
+    _append_csv(oof_df, processed_dir / "train_cv_predictions.csv")
 
     logging.info("Export fertig: %s", warehouse_raw_dir)
 

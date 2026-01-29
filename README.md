@@ -10,7 +10,7 @@ Dieses Repo enthält eine end-to-end ML-Pipeline für den Kaggle-Datensatz **Hou
 - **Lakehouse (Databricks):** Bronze -> Silver -> Gold (Feature Engineering) als Parquet in einem Databricks Volume
 - **Training (lokal):** `train.py` (Analysis / Train-only)
 - **Inference (lokal):** `predict.py` (Submission + optional Warehouse-Export)
-- **Warehouse (BigQuery):** RAW-Tabellen laden + Views/Marts erzeugen -> Power BI
+- **Warehouse (BigQuery):** RAW-Tabellen laden + Views/Marts erzeugen -> Power BI Desktop
 
 ---
 
@@ -28,11 +28,21 @@ Dieses Repo enthält eine end-to-end ML-Pipeline für den Kaggle-Datensatz **Hou
 ├─ data/
 │  ├─ raw/                      # Kaggle CSVs (train.csv / test.csv)
 │  ├─ feature_store/            # Downloaded Gold-Parquet (optional)
+│  ├─ processed/                # lokal gespeicherte appended Outputs
 │  └─ warehouse/
 │     └─ raw/                   # reproduzierbare Exports (Parquet) für BigQuery RAW
 ├─ docs/
-│  └─ architecture.md
+│  ├─ architecture.md
+│  └─ experiments.md
 ├─ models/                      # gespeicherte Modelle (.joblib)
+├─ notebooks/                   
+│  ├─ jupyter/                  # Jupyter Notebooks (testing)
+│  └─ lakehouse/                # Python scripts zur Ausführung von Databricks Jobs (CLI)
+│     ├─ 00_bootstrap.py
+│     ├─ 01_bronze_job.py
+│     ├─ 02_silver_job.py
+│     └─ 03_gold_job.py
+├─ plots/                       # gespeicherte Analyse Plots
 ├─ predictions/                 # lokal erzeugte Predictions/Submission
 ├─ scripts/
 │  ├─ databricks/
@@ -42,8 +52,9 @@ Dieses Repo enthält eine end-to-end ML-Pipeline für den Kaggle-Datensatz **Hou
 │  │  ├─ download_feature_store.ps1   # Gold Parquets lokal nach data/feature_store/ kopieren
 │  │  └─ sync_feature_store.py        # optional: Manifest/Sync-Logic (falls genutzt)
 │  └─ bigquery/
+│     ├─ apply_views.py
 │     ├─ load_raw_tables.py
-│     └─ apply_views.py
+│     └─ sync_bigquery.py
 ├─ src/
 │  ├─ data.py
 │  ├─ features.py
@@ -71,7 +82,15 @@ python predict.py --data-source csv
 
 ### 2) Mit Gold-Data aus Databricks trainieren (Databricks Parquets -> train/predict in Python)
 
-#### Databricks Repo: Git-Sync und Job-Ausführung
+Existiert vorbearbeitete Gold-Data aus dem Databricks Lakehouse im data/feature_store kann ohne Feature Engineering in Python trainiert werden.
+
+```powershell
+# aus der venv heraus
+python train.py --mode analysis --data-source gold
+python predict.py --data-source gold
+```
+
+#### Databricks Setup: Git-Sync und Job-Ausführung
 
 Ziel: Databricks Jobs sollen immer den aktuellen Code-Stand aus einem **Databricks Repo** verwenden.
 
@@ -86,7 +105,7 @@ Beispielwerte (anpassen):
 - `<GIT_REPO_URL>`: `https://github.com/<ORG_OR_USER>/house-price-model.git`
 - `<DATABRICKS_REPO_PATH>`: `/Repos/<USERNAME>/house-price-model`
 
-#### A) One-time Setup (Repo anlegen und Jobs auf Repo-Notebooks umstellen)
+#### Databricks Setup: Repo anlegen und Jobs auf Repo-Notebooks umstellen
 
 1) Databricks Repo erstellen:
 
@@ -104,7 +123,7 @@ python scripts/databricks/update_jobs_to_repo.py `
 
 Hinweis: Dieser Schritt ist nur beim Setup oder nach strukturellen Notebook-Pfadänderungen erforderlich.
 
-#### B) Standard-Workflow nach `git push` (Repo syncen, Jobs laufen lassen)
+#### Databricks Setup: Repo syncen, Jobs laufen lassen
 
 1) Repo in Databricks auf den neuesten Git-Stand bringen:
 
@@ -121,7 +140,7 @@ python scripts/databricks/sync_repo.py `
 python scripts/databricks/run_lakehouse_jobs.py --stage all --profile "<DATABRICKS_PROFILE>"
 ```
 
-#### C) Konflikte durch manuelle Änderungen in Databricks behandeln (Hard Reset)
+#### Databricks Setup: Konflikte durch manuelle Änderungen in Databricks behandeln
 
 Wenn `repos update` aufgrund lokaler Änderungen/Conflicts im Databricks Repo fehlschlägt, kann das Repo automatisiert zurückgesetzt werden:
 
@@ -138,26 +157,21 @@ python scripts/databricks/sync_repo.py `
   --reset-if-conflict --backup
 ```
 
-#### D) Ergebnis: Gold-Parquet im Databricks Volume
+#### Databricks Setup: Gold-Parquet im Databricks Volume
 
 Nach erfolgreichem Gold-Job liegen die Artefakte im Volume, z. B.:
 
 - `dbfs:/Volumes/workspace/house_prices/feature_store/`
 
-### 3) Gold lokal herunterladen (Feature Store -> `data/feature_store/`)
+### Databricks Setup: Gold lokal herunterladen (Feature Store -> `data/feature_store/`)
 
 ```powershell
 .\scripts\databricks\download_feature_store.ps1
 ```
 
-Danach kann lokal im Gold-Modus trainiert werden (ohne Feature Engineering in Python):
+### 3) BigQuery Setup
 
-```powershell
-python train.py --mode analysis --data-source gold
-python predict.py --data-source gold
-```
-
-### 4) BigQuery befüllen (RAW) + Views/Marts anwenden
+#### Bigquery befüllen (RAW) + Views/Marts anwenden
 
 ```powershell
 $env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\service_account.json"
@@ -166,6 +180,45 @@ $env:BQ_PROJECT_ID="house-price-model"
 python -m scripts.bigquery.load_raw_tables --dataset house_prices_raw
 python -m scripts.bigquery.apply_views --raw house_prices_raw --core house_prices_core --marts house_prices_marts
 ```
+
+#### RAW laden
+
+```powershell
+python -m scripts.bigquery.load_raw_tables --project $env:BQ_PROJECT_ID --dataset house_prices_raw --location $env:BQ_LOCATION
+```
+
+#### CORE/MARTS Views aktualisieren
+
+Die Views werden aus `cloud/bigquery/marts_views.sql` gebaut und in `house_prices_marts` veröffentlicht.
+
+```powershell
+python -m scripts.bigquery.apply_views --project $env:BQ_PROJECT_ID --raw house_prices_raw --core house_prices_core --marts house_prices_marts --location $env:BQ_LOCATION
+```
+
+---
+
+### 4) Power BI Desktop (Import)
+
+1. **Get data → Google BigQuery** (nicht Entra ID)
+2. **Import** wählen
+3. Dataset **house_prices_marts** öffnen und die Views importieren:
+   - `model_leaderboard`
+   - `champion_by_run`
+   - `cv_error_by_bucket`
+   - `top_outliers`
+   - `dim_run`
+   - `dim_model`
+4. **Refresh** nach jedem neuen Run.
+
+---
+
+#### Power BI Dashboards (Screenshots)
+
+![Leaderboard](docs/powerbi/Leaderboard.png)
+
+![Data Analysis](docs/powerbi/Data%20Analysis.png)
+
+![Bucket Analysis](docs/powerbi/Bucket%20Analysis.png)
 
 ---
 
@@ -228,13 +281,14 @@ Beispiele für Placeholders:
 
 ---
 
-## BigQuery (für `scripts/bigquery/*`)
+## BigQuery CLI (für `scripts/bigquery/*`)
 
 Setze die Env-Variable auf deinen Service-Account-Key (JSON):
 
 ```powershell
 $env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\service_account.json"
 $env:BQ_PROJECT_ID="house-price-model"
+$env:BQ_LOCATION="EU"
 ```
 
 ---
