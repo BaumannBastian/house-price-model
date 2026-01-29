@@ -283,7 +283,7 @@ Beispiele für Placeholders:
 
 ## BigQuery CLI (für `scripts/bigquery/*`)
 
-Setze die Env-Variable auf deinen Service-Account-Key (JSON):
+Setze die Env-Variable auf den Service-Account-Key (JSON):
 
 ```powershell
 $env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\service_account.json"
