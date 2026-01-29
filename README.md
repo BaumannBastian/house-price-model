@@ -37,7 +37,7 @@ Dieses Repo enthält eine end-to-end ML-Pipeline für den Kaggle-Datensatz **Hou
 ├─ models/                      # gespeicherte Modelle (.joblib)
 ├─ notebooks/                   
 │  ├─ jupyter/                  # Jupyter Notebooks (testing)
-│  └─ lakehouse/                # Python scripts zur Ausführung von Databricks Jobs (CLI)
+│  └─ lakehouse/                # Ausführung von Databricks Jobs (CLI)
 │     ├─ 00_bootstrap.py
 │     ├─ 01_bronze_job.py
 │     ├─ 02_silver_job.py
